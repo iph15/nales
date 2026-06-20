@@ -916,7 +916,7 @@ if model_ready:
     with tab_betting:
         st.markdown("### 🎯 Consejos y Pronósticos de Apuestas de Alta Probabilidad")
         st.write("Basado en 5,000 simulaciones completas de Monte Carlo del Mundial 2026 y la calibración de goles de la distribución de Poisson.")
-        st.markdown("💡 *Los resultados reales de los partidos se obtienen online y en tiempo real desde GitHub para auditar y verificar el éxito de los pronósticos de la IA.*")
+        st.markdown("💡 *Los resultados reales de los partidos se obtienen online y en tiempo real desde GitHub. Los partidos pasados se marcan como biased porque sus características ya incluyen el resultado post-partido, mientras que los partidos pendientes son predicciones puras sin sesgo.*")
         
         # Calcular estadísticas globales de acierto para partidos jugados
         total_bets = 0
@@ -943,7 +943,8 @@ if model_ready:
                 'Resultado Real': f"{hs_a} - {hs_b}",
                 'Apuesta Realizada': f"{bet_type}",
                 'Prob. Estimada': f"{prob*100:.1f}%",
-                'Estado': "✅ ACERTADA" if is_won else "❌ FALLADA"
+                'Estado': "✅ ACERTADA" if is_won else "❌ FALLADA",
+                'Tipo Evaluación': "⚠️ BIASED (A Posteriori)"
             })
             
         accuracy = (won_bets / total_bets * 100) if total_bets > 0 else 0.0
@@ -974,6 +975,95 @@ if model_ready:
             
         st.markdown("---")
         
+        # Obtener pendientes
+        pending_bets = []
+        for group_name, teams in pred.WC2026_GROUPS.items():
+            for i in range(len(teams)):
+                for j in range(i + 1, len(teams)):
+                    ta = pred.normalize_name(teams[i])
+                    tb = pred.normalize_name(teams[j])
+                    
+                    # Verificar si ya se jugó
+                    played = False
+                    for r in wc2026_results:
+                        r_home = pred.normalize_name(r['home'])
+                        r_away = pred.normalize_name(r['away'])
+                        if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
+                            played = True
+                            break
+                    
+                    if not played:
+                        bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
+                        pending_bets.append({
+                            'group': group_name,
+                            'match': f"{ta} vs {tb}",
+                            'favorite': fav,
+                            'underdog': und,
+                            'bet_type': bet_type,
+                            'prob': prob
+                        })
+                        
+        pending_bets_sorted = sorted(pending_bets, key=lambda x: x['prob'], reverse=True)
+        
+        # --- NUEVA SECCIÓN: COMBINADAS RECOMENDADAS ---
+        if len(pending_bets_sorted) >= 3:
+            st.markdown("#### 🔗 Combinadas Recomendadas por la IA (Parlays)")
+            st.write("Combinamos múltiples pronósticos de alta probabilidad para maximizar la cuota manteniendo un perfil de riesgo controlado.")
+            
+            # 1. Combinada Segura
+            segura_items = pending_bets_sorted[:3]
+            prob_segura = 1.0
+            for b in segura_items:
+                prob_segura *= b['prob']
+            cuota_segura = 1.0 / prob_segura if prob_segura > 0 else 1.0
+            
+            # 2. Combinada Moderada
+            moderada_items = pending_bets_sorted[3:6] if len(pending_bets_sorted) >= 6 else pending_bets_sorted[-3:]
+            prob_moderada = 1.0
+            for b in moderada_items:
+                prob_moderada *= b['prob']
+            cuota_moderada = 1.0 / prob_moderada if prob_moderada > 0 else 1.0
+            
+            col_parlay_1, col_parlay_2 = st.columns(2)
+            
+            with col_parlay_1:
+                st.markdown(f"""
+                <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border-left: 6px solid #10B981; margin-bottom: 20px; min-height: 280px; display: flex; flex-direction: column; justify-content: space-between;'>
+                    <div>
+                        <div style='display: flex; justify-content: space-between; align-items: center;'>
+                            <span style='background-color: #10B981; color: white; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>RIESGO BAJO</span>
+                            <span style='font-size: 0.9rem; color: #94A3B8;'>Prob: <b>{prob_segura*100:.1f}%</b></span>
+                        </div>
+                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟢 La Combinada Segura (Cuota @{cuota_segura:.2f})</h4>
+                        <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.6;'>
+                            • <b>{segura_items[0]['match']}</b>: {segura_items[0]['bet_type']} ({segura_items[0]['prob']*100:.1f}%)<br>
+                            • <b>{segura_items[1]['match']}</b>: {segura_items[1]['bet_type']} ({segura_items[1]['prob']*100:.1f}%)<br>
+                            • <b>{segura_items[2]['match']}</b>: {segura_items[2]['bet_type']} ({segura_items[2]['prob']*100:.1f}%)
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            with col_parlay_2:
+                st.markdown(f"""
+                <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border-left: 6px solid #EAB308; margin-bottom: 20px; min-height: 280px; display: flex; flex-direction: column; justify-content: space-between;'>
+                    <div>
+                        <div style='display: flex; justify-content: space-between; align-items: center;'>
+                            <span style='background-color: #EAB308; color: #0F172A; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>RIESGO MEDIO</span>
+                            <span style='font-size: 0.9rem; color: #94A3B8;'>Prob: <b>{prob_moderada*100:.1f}%</b></span>
+                        </div>
+                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟡 La Combinada de Valor (Cuota @{cuota_moderada:.2f})</h4>
+                        <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.6;'>
+                            • <b>{moderada_items[0]['match']}</b>: {moderada_items[0]['bet_type']} ({moderada_items[0]['prob']*100:.1f}%)<br>
+                            • <b>{moderada_items[1]['match']}</b>: {moderada_items[1]['bet_type']} ({moderada_items[1]['prob']*100:.1f}%)<br>
+                            • <b>{moderada_items[2]['match']}</b>: {moderada_items[2]['bet_type']} ({moderada_items[2]['prob']*100:.1f}%)
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            st.markdown("---")
+            
         # Sub-pestañas para segmentar apuestas
         sub_tab_pending, sub_tab_history = st.tabs([
             "🔮 Apuestas para Partidos Restantes",
@@ -983,36 +1073,6 @@ if model_ready:
         with sub_tab_pending:
             st.markdown("#### 🔮 Pronósticos para los Próximos Partidos del Mundial 2026")
             st.write("A continuación se listan las apuestas recomendadas (las de mayor probabilidad) para cada uno de los partidos restantes de la fase de grupos.")
-            
-            # Obtener pendientes
-            pending_bets = []
-            for group_name, teams in pred.WC2026_GROUPS.items():
-                for i in range(len(teams)):
-                    for j in range(i + 1, len(teams)):
-                        ta = pred.normalize_name(teams[i])
-                        tb = pred.normalize_name(teams[j])
-                        
-                        # Verificar si ya se jugó
-                        played = False
-                        for r in wc2026_results:
-                            r_home = pred.normalize_name(r['home'])
-                            r_away = pred.normalize_name(r['away'])
-                            if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
-                                played = True
-                                break
-                        
-                        if not played:
-                            bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
-                            pending_bets.append({
-                                'group': group_name,
-                                'match': f"{ta} vs {tb}",
-                                'favorite': fav,
-                                'underdog': und,
-                                'bet_type': bet_type,
-                                'prob': prob
-                            })
-                            
-            pending_bets_sorted = sorted(pending_bets, key=lambda x: x['prob'], reverse=True)
             
             if len(pending_bets_sorted) > 0:
                 # Mostrar top 3 destacadas como tarjetas visuales
@@ -1040,7 +1100,8 @@ if model_ready:
                         'Partido': b['match'],
                         'Favorito': b['favorite'],
                         'Apuesta Recomendada': b['bet_type'],
-                        'Confianza de la IA': f"{b['prob']*100:.1f}%"
+                        'Confianza de la IA': f"{b['prob']*100:.1f}%",
+                        'Evaluación': "🆕 NEW (Predicción Pura)"
                     } for b in pending_bets_sorted
                 ])
                 st.dataframe(df_pending, use_container_width=True, hide_index=True)
