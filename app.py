@@ -221,6 +221,11 @@ def get_team_color(team, default='#1e293b'):
 def load_pretrained_assets():
     """Carga los assets pre-entrenados del modelo para Streamlit."""
     import pickle
+    import sys
+    # Registrar EloSystem y default_rating en __main__ para evitar fallos de pickle
+    sys.modules['__main__'].EloSystem = pred.EloSystem
+    sys.modules['__main__'].default_rating = pred.default_rating
+    
     assets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "model_assets.pkl")
     if not os.path.exists(assets_path):
         assets_path = os.path.join(os.getcwd(), "output", "model_assets.pkl")
