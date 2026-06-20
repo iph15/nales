@@ -1289,8 +1289,9 @@ if model_ready:
             st.markdown("---")
             
         # Sub-pestañas para segmentar apuestas
-        sub_tab_pending, sub_tab_history = st.tabs([
+        sub_tab_pending, sub_tab_errors, sub_tab_history = st.tabs([
             "🔮 Apuestas para Partidos Restantes",
+            "🚨 Errores de Cuota y Arbitraje",
             "📜 Historial y Verificación de Resultados"
         ])
         
@@ -1334,6 +1335,154 @@ if model_ready:
                 st.dataframe(df_pending, use_container_width=True, hide_index=True)
             else:
                 st.info("🎉 ¡Fase de grupos completada! Todos los partidos ya han sido jugados.")
+                
+        with sub_tab_errors:
+            st.markdown("#### 🚨 Detección de Errores de Cuotas y Arbitraje Deportivo")
+            st.write("Esta sección identifica anomalías matemáticas y discrepancias críticas en el mercado:")
+            st.markdown("""
+            1. **Surebets (Arbitraje Deportivo):** Oportunidades donde la diferencia de cuotas entre distintas casas de apuestas permite apostar a todas las posibilidades y asegurar un beneficio matemático neto (sin riesgo de pérdida).
+            2. **Desajustes de Cuota (+EV Crítico):** Situaciones donde alguna casa de apuestas ofrece una cuota que supera por más de un **12%** a la cuota justa calculada por nuestro modelo predictivo.
+            """)
+            
+            # Listas para guardar las oportunidades encontradas
+            surebets = []
+            extreme_values = []
+            
+            for b in pending_bets_sorted:
+                ta, tb = b['match'].split(" vs ")
+                
+                # Obtener predicciones completas
+                probs, _ = get_match_prediction(ta, tb, selected_model_name)
+                p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
+                
+                # Obtener cuotas de todas las casas de apuestas (reales o simuladas)
+                matchup_odds = live_odds.get((ta, tb))
+                if not matchup_odds:
+                    matchup_odds = generate_stable_mock_odds(ta, tb, p_draw, p_win_a, p_win_b)
+                
+                if matchup_odds:
+                    # Encontrar el bookmaker con la mejor cuota para cada opción de 1X2
+                    best_home_odd = 0.0
+                    best_home_bm = ""
+                    best_draw_odd = 0.0
+                    best_draw_bm = ""
+                    best_away_odd = 0.0
+                    best_away_bm = ""
+                    
+                    for bm_name, odds in matchup_odds.items():
+                        if odds['home'] > best_home_odd:
+                            best_home_odd = odds['home']
+                            best_home_bm = bm_name
+                        if odds['draw'] > best_draw_odd:
+                            best_draw_odd = odds['draw']
+                            best_draw_bm = bm_name
+                        if odds['away'] > best_away_odd:
+                            best_away_odd = odds['away']
+                            best_away_bm = bm_name
+                            
+                    # Verificar si existe Surebet (suma de inversas < 1.0)
+                    inv_home = 1.0 / best_home_odd if best_home_odd > 0 else 0
+                    inv_draw = 1.0 / best_draw_odd if best_draw_odd > 0 else 0
+                    inv_away = 1.0 / best_away_odd if best_away_odd > 0 else 0
+                    sure_sum = inv_home + inv_draw + inv_away
+                    
+                    if sure_sum < 1.0 and sure_sum > 0:
+                        profit = (1.0 / sure_sum - 1.0) * 100.0
+                        surebets.append({
+                            'match': b['match'],
+                            'home': f"{best_home_bm} (@{best_home_odd:.2f})",
+                            'draw': f"{best_draw_bm} (@{best_draw_odd:.2f})",
+                            'away': f"{best_away_bm} (@{best_away_odd:.2f})",
+                            'profit': profit,
+                            'sure_sum': sure_sum,
+                            'best_home_odd': best_home_odd,
+                            'best_draw_odd': best_draw_odd,
+                            'best_away_odd': best_away_odd
+                        })
+                        
+                    # Verificar Value Bets extremas en 1X2 (>12% de EV)
+                    ia_odd_home = 1.0 / p_win_a if p_win_a > 0 else 99.0
+                    ia_odd_draw = 1.0 / p_draw if p_draw > 0 else 99.0
+                    ia_odd_away = 1.0 / p_win_b if p_win_b > 0 else 99.0
+                    
+                    for bm_name, odds in matchup_odds.items():
+                        ev_home = ((odds['home'] / ia_odd_home) - 1.0) * 100.0
+                        ev_draw = ((odds['draw'] / ia_odd_draw) - 1.0) * 100.0
+                        ev_away = ((odds['away'] / ia_odd_away) - 1.0) * 100.0
+                        
+                        if ev_home > 12.0:
+                            extreme_values.append({
+                                'Partido': b['match'],
+                                'Casa de Apuestas': bm_name,
+                                'Selección': f"Gana {ta}",
+                                'Cuota Real': f"@{odds['home']:.2f}",
+                                'Cuota IA': f"@{ia_odd_home:.2f}",
+                                'Valor (+EV)': f"{ev_home:+.1f}%"
+                            })
+                        if ev_draw > 12.0:
+                            extreme_values.append({
+                                'Partido': b['match'],
+                                'Casa de Apuestas': bm_name,
+                                'Selección': "Empate",
+                                'Cuota Real': f"@{odds['draw']:.2f}",
+                                'Cuota IA': f"@{ia_odd_draw:.2f}",
+                                'Valor (+EV)': f"{ev_draw:+.1f}%"
+                            })
+                        if ev_away > 12.0:
+                            extreme_values.append({
+                                'Partido': b['match'],
+                                'Casa de Apuestas': bm_name,
+                                'Selección': f"Gana {tb}",
+                                'Cuota Real': f"@{odds['away']:.2f}",
+                                'Cuota IA': f"@{ia_odd_away:.2f}",
+                                'Valor (+EV)': f"{ev_away:+.1f}%"
+                            })
+            
+            # --- Renderizar Surebets ---
+            st.markdown("##### 💸 Oportunidades de Arbitraje Encontradas (Surebets)")
+            if len(surebets) > 0:
+                surebets_sorted = sorted(surebets, key=lambda x: x['profit'], reverse=True)
+                for sb in surebets_sorted:
+                    # Distribuir stake para inversión total de 100 €
+                    stake_h = 100.0 * (1.0 / sb['best_home_odd']) / sb['sure_sum']
+                    stake_d = 100.0 * (1.0 / sb['best_draw_odd']) / sb['sure_sum']
+                    stake_a = 100.0 * (1.0 / sb['best_away_odd']) / sb['sure_sum']
+                    ganancia_segura = (100.0 / sb['sure_sum']) - 100.0
+                    
+                    st.markdown(f"""
+                    <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border-left: 6px solid #10B981; margin-bottom: 15px;'>
+                        <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap;'>
+                            <h5 style='color: #F8FAFC; margin: 0; font-weight: 800;'>🔥 {sb['match']}</h5>
+                            <span style='background-color: #10B981; color: white; font-weight: 800; font-size: 0.85rem; padding: 4px 12px; border-radius: 20px;'>
+                                Retorno Seguro: +{sb['profit']:.2f}%
+                            </span>
+                        </div>
+                        <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.8;'>
+                            • <b>Local (1):</b> {sb['home']} ➔ Apostar <b>{stake_h:.2f} €</b> (Retorno: {(stake_h * sb['best_home_odd']):.2f} €)<br>
+                            • <b>Empate (X):</b> {sb['draw']} ➔ Apostar <b>{stake_d:.2f} €</b> (Retorno: {(stake_d * sb['best_draw_odd']):.2f} €)<br>
+                            • <b>Visitante (2):</b> {sb['away']} ➔ Apostar <b>{stake_a:.2f} €</b> (Retorno: {(stake_a * sb['best_away_odd']):.2f} €)<br>
+                            <span style='color: #38BDF8; font-weight: 700; font-size: 0.85rem;'>
+                                Inversión: 100.00 € | Ganancia neta garantizada: {ganancia_segura:.2f} € sin importar el resultado.
+                            </span>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("ℹ️ No se detectan oportunidades de arbitraje (surebets) con las cuotas actuales de las casas de apuestas.")
+                
+            # --- Renderizar Value Bets Extremas ---
+            st.markdown("##### 🎯 Desajustes Críticos de Cuota de las Casas de Apuestas")
+            if len(extreme_values) > 0:
+                df_extreme = pd.DataFrame(extreme_values)
+                # Ordenar por EV
+                df_extreme['ev_num'] = df_extreme['Valor (+EV)'].str.replace('%', '').str.replace('+', '').astype(float)
+                df_extreme = df_extreme.sort_values(by='ev_num', ascending=False).drop(columns=['ev_num'])
+                
+                st.dataframe(df_extreme, use_container_width=True, hide_index=True)
+                st.warning("⚠️ **Atención:** Las cuotas descompensadas con EV muy alto pueden responder a noticias de última hora no reflejadas en los modelos (lesiones críticas, ausencias, alineaciones alternativas). Evalúalas con criterio futbolístico antes de apostar.")
+            else:
+                st.info("ℹ️ No se detectan desajustes críticos de cuota (>12% EV) en los partidos restantes del Mundial.")
+
                 
         with sub_tab_history:
             st.markdown("#### 📜 Historial de Apuestas y Resultados Obtenidos")
