@@ -1059,6 +1059,3 @@ if model_ready:
                 
 else:
     st.warning("⚠️ El modelo de Machine Learning no ha terminado de entrenarse o no está disponible. Inicializa el script primero.")
-                
-else:
-    st.warning("⚠️ El modelo de Machine Learning no ha terminado de entrenarse o no está disponible. Inicializa el script primero.")
