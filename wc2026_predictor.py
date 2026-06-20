@@ -163,6 +163,39 @@ BETTING_ODDS = {
     'Cape Verde': 0.0005, 'Haiti': 0.0003, 'Curacao': 0.0002,
 }
 
+# --- Valor de mercado de las plantillas (Millones de Euros, junio 2026) ---
+SQUAD_VALUES = {
+    'England': 1500.0, 'France': 1300.0, 'Brazil': 1100.0, 'Portugal': 1050.0,
+    'Spain': 1000.0, 'Argentina': 850.0, 'Germany': 800.0, 'Netherlands': 700.0,
+    'Belgium': 550.0, 'Uruguay': 480.0, 'Norway': 450.0, 'Croatia': 380.0,
+    'Morocco': 350.0, 'Turkey': 350.0, 'United States': 350.0, 'Colombia': 320.0,
+    'Ivory Coast': 300.0, 'Japan': 280.0, 'Senegal': 280.0, 'Switzerland': 260.0,
+    'Sweden': 250.0, 'Austria': 240.0, 'Ecuador': 220.0, 'Ghana': 200.0,
+    'Scotland': 200.0, 'Czech Republic': 180.0, 'Mexico': 180.0, 'South Korea': 170.0,
+    'Canada': 160.0, 'Egypt': 140.0, 'Algeria': 130.0, 'Paraguay': 130.0,
+    'Bosnia and Herzegovina': 90.0, 'Tunisia': 70.0, 'DR Congo': 60.0, 'Australia': 50.0,
+    'Iran': 50.0, 'Cape Verde': 40.0, 'Uzbekistan': 40.0, 'South Africa': 35.0,
+    'Saudi Arabia': 30.0, 'Panama': 25.0, 'Qatar': 20.0, 'Iraq': 15.0,
+    'Jordan': 15.0, 'New Zealand': 15.0, 'Haiti': 10.0, 'Curacao': 8.0
+}
+
+# --- Confederaciones de las selecciones del Mundial 2026 ---
+CONFEDERATIONS = {
+    'Mexico': 'CONCACAF', 'South Africa': 'CAF', 'South Korea': 'AFC', 'Czech Republic': 'UEFA',
+    'Canada': 'CONCACAF', 'Bosnia and Herzegovina': 'UEFA', 'Qatar': 'AFC', 'Switzerland': 'UEFA',
+    'Brazil': 'CONMEBOL', 'Morocco': 'CAF', 'Haiti': 'CONCACAF', 'Scotland': 'UEFA',
+    'United States': 'CONCACAF', 'Paraguay': 'CONMEBOL', 'Australia': 'AFC', 'Turkey': 'UEFA',
+    'Germany': 'UEFA', 'Curacao': 'CONCACAF', 'Ivory Coast': 'CAF', 'Ecuador': 'CONMEBOL',
+    'Netherlands': 'UEFA', 'Japan': 'AFC', 'Sweden': 'UEFA', 'Tunisia': 'CAF',
+    'Belgium': 'UEFA', 'Egypt': 'CAF', 'Iran': 'AFC', 'New Zealand': 'OFC',
+    'Spain': 'UEFA', 'Cape Verde': 'CAF', 'Saudi Arabia': 'AFC', 'Uruguay': 'CONMEBOL',
+    'France': 'UEFA', 'Senegal': 'CAF', 'Iraq': 'AFC', 'Norway': 'UEFA',
+    'Argentina': 'CONMEBOL', 'Algeria': 'CAF', 'Austria': 'UEFA', 'Jordan': 'AFC',
+    'Portugal': 'UEFA', 'DR Congo': 'CAF', 'Uzbekistan': 'AFC', 'Colombia': 'CONMEBOL',
+    'England': 'UEFA', 'Croatia': 'UEFA', 'Ghana': 'CAF', 'Panama': 'CONCACAF'
+}
+
+
 # --- Resultados ya jugados del Mundial 2026 ---
 WC2026_RESULTS = [
     # Jornada 1
@@ -300,6 +333,10 @@ def generate_synthetic_data():
     return pd.DataFrame(records)
 
 
+def default_rating():
+    return 1500.0
+
+
 # =============================================================================
 # SECCIÓN 3: CÁLCULO DE ELO RATINGS
 # =============================================================================
@@ -308,7 +345,7 @@ class EloSystem:
     """Sistema de ratings Elo para selecciones de fútbol."""
     
     def __init__(self, k_base=30, home_advantage=100):
-        self.ratings = defaultdict(lambda: 1500)
+        self.ratings = defaultdict(default_rating)
         self.k_base = k_base
         self.home_advantage = home_advantage
         self.history = defaultdict(list)  # {team: [(date, rating), ...]}
@@ -411,10 +448,23 @@ def time_decay_weight(match_date, reference_date=None, half_life_years=3):
     if reference_date is None:
         reference_date = REFERENCE_DATE
     
+    # Si ya son datetime/Timestamp, saltar parsing de strings
     if isinstance(match_date, str):
         match_date = datetime.strptime(match_date[:10], '%Y-%m-%d')
     if isinstance(reference_date, str):
         reference_date = datetime.strptime(reference_date[:10], '%Y-%m-%d')
+        
+    # Convertir Timestamps de pandas a datetime estándar si es necesario
+    if hasattr(match_date, 'to_pydatetime'):
+        match_date = match_date.to_pydatetime()
+    if hasattr(reference_date, 'to_pydatetime'):
+        reference_date = reference_date.to_pydatetime()
+    
+    # Asegurar que ambos no tienen zona horaria o sí la tienen
+    if match_date.tzinfo is not None:
+        match_date = match_date.replace(tzinfo=None)
+    if reference_date.tzinfo is not None:
+        reference_date = reference_date.replace(tzinfo=None)
     
     days_diff = (reference_date - match_date).days
     if days_diff < 0:
@@ -443,18 +493,40 @@ def tournament_weight(tournament):
         return 1.0  # Amistosos
 
 
-def compute_team_features(df, team, n_recent=10):
+def get_squad_value(team):
+    """Obtiene el valor de mercado estimado de la plantilla."""
+    tn = normalize_name(team)
+    if tn in SQUAD_VALUES:
+        return SQUAD_VALUES[tn]
+    # Estimar usando el ranking FIFA (si no está, usar rank 70 por defecto)
+    rank_info = FIFA_RANKINGS.get(tn, None)
+    r = rank_info['rank'] if rank_info else 70
+    estimated = 1200.0 * (0.95 ** r)
+    return max(5.0, round(estimated, 1))
+
+
+def get_confederation(team):
+    """Obtiene la confederación de fútbol de un equipo."""
+    tn = normalize_name(team)
+    return CONFEDERATIONS.get(tn, 'OFC')
+
+
+CONFEDERATION_STRENGTH = {
+    'CONMEBOL': 4.5,
+    'UEFA': 4.0,
+    'CONCACAF': 2.5,
+    'CAF': 2.0,
+    'AFC': 1.5,
+    'OFC': 1.0
+}
+
+
+def compute_team_features_from_history(history_list, reference_date, n_recent=10):
     """
-    Calcula features para un equipo basado en su historial.
-    Aplica decaimiento temporal y pesos por torneo.
+    Calcula features para un equipo basándose únicamente en su historial previo.
+    history_list es una lista de partidos jugados por el equipo, ordenados por fecha ascendente.
     """
-    team_n = normalize_name(team)
-    
-    # Filtrar partidos del equipo
-    mask = (df['home_team_n'] == team_n) | (df['away_team_n'] == team_n)
-    team_df = df[mask].sort_values('date', ascending=False).copy()
-    
-    if len(team_df) == 0:
+    if len(history_list) == 0:
         return {
             'weighted_win_rate': 0.33,
             'weighted_draw_rate': 0.34,
@@ -469,48 +541,67 @@ def compute_team_features(df, team, n_recent=10):
             'wc_experience': 0,
         }
     
-    # Calcular resultados y pesos
+    # Convertir reference_date a datetime si es Timestamp/str
+    if isinstance(reference_date, str):
+        ref_dt = datetime.strptime(reference_date[:10], '%Y-%m-%d')
+    elif hasattr(reference_date, 'to_pydatetime'):
+        ref_dt = reference_date.to_pydatetime()
+    else:
+        ref_dt = reference_date
+        
+    if ref_dt.tzinfo is not None:
+        ref_dt = ref_dt.replace(tzinfo=None)
+
+    # Filtrar historial a los últimos 8 años
+    cutoff_date = ref_dt - timedelta(days=8 * 365.25)
+    
+    # history_list está ordenado por fecha. Vamos a procesarlos de más reciente a más antiguo
     results = []
-    for _, row in team_df.iterrows():
-        is_home = row['home_team_n'] == team_n
-        gs = row['home_score'] if is_home else row['away_score']
-        gc = row['away_score'] if is_home else row['home_score']
-        
-        if gs > gc:
-            result = 'W'
-        elif gs == gc:
-            result = 'D'
+    for match in reversed(history_list):
+        m_date = match['date']
+        # Convertir a datetime para la comparación
+        if isinstance(m_date, str):
+            m_date_dt = datetime.strptime(m_date[:10], '%Y-%m-%d')
+        elif hasattr(m_date, 'to_pydatetime'):
+            m_date_dt = m_date.to_pydatetime()
         else:
-            result = 'L'
+            m_date_dt = m_date
+            
+        if m_date_dt.tzinfo is not None:
+            m_date_dt = m_date_dt.replace(tzinfo=None)
+            
+        if m_date_dt < cutoff_date:
+            break # Como está ordenado, el resto también son más antiguos que el cutoff
+            
+        gs = match['goals_scored']
+        gc = match['goals_conceded']
+        res = match['result']
         
-        tw = time_decay_weight(row['date'])
-        tourney_w = tournament_weight(row.get('tournament', 'Friendly'))
+        tw = time_decay_weight(match['date'], reference_date=reference_date)
+        tourney_w = tournament_weight(match['tournament'])
         combined_weight = tw * tourney_w
         
-        is_official = 'friendly' not in str(row.get('tournament', '')).lower()
-        is_wc = 'world cup' in str(row.get('tournament', '')).lower() and 'qualif' not in str(row.get('tournament', '')).lower()
+        is_official = 'friendly' not in str(match['tournament']).lower()
+        is_wc = 'world cup' in str(match['tournament']).lower() and 'qualif' not in str(match['tournament']).lower()
         
         results.append({
-            'result': result,
+            'result': res,
             'goals_scored': gs,
             'goals_conceded': gc,
             'weight': combined_weight,
-            'time_weight': tw,
             'is_official': is_official,
             'is_wc': is_wc,
         })
     
-    results_df = pd.DataFrame(results)
-    
     # --- Features con pesos temporales ---
-    total_weight = results_df['weight'].sum()
+    total_weight = sum(r['weight'] for r in results)
     if total_weight > 0:
-        weighted_wins = results_df[results_df['result'] == 'W']['weight'].sum()
-        weighted_draws = results_df[results_df['result'] == 'D']['weight'].sum()
+        weighted_wins = sum(r['weight'] for r in results if r['result'] == 'W')
+        weighted_draws = sum(r['weight'] for r in results if r['result'] == 'D')
         weighted_win_rate = weighted_wins / total_weight
         weighted_draw_rate = weighted_draws / total_weight
-        weighted_gs = (results_df['goals_scored'] * results_df['weight']).sum() / total_weight
-        weighted_gc = (results_df['goals_conceded'] * results_df['weight']).sum() / total_weight
+        weighted_gs = sum(r['goals_scored'] * r['weight'] for r in results) / total_weight
+        weighted_gc = sum(r['goals_conceded'] * r['weight'] for r in results) / total_weight
     else:
         weighted_win_rate = 0.33
         weighted_draw_rate = 0.34
@@ -518,37 +609,41 @@ def compute_team_features(df, team, n_recent=10):
         weighted_gc = 1.0
     
     # --- Forma reciente (últimos N partidos) ---
-    recent = results_df.head(n_recent)
+    recent = results[:n_recent]
     if len(recent) > 0:
-        recent_wins = (recent['result'] == 'W').sum()
+        recent_wins = sum(1 for r in recent if r['result'] == 'W')
         recent_win_rate = recent_wins / len(recent)
-        recent_gs = recent['goals_scored'].mean()
-        recent_gc = recent['goals_conceded'].mean()
+        recent_gs = sum(r['goals_scored'] for r in recent) / len(recent)
+        recent_gc = sum(r['goals_conceded'] for r in recent) / len(recent)
     else:
         recent_win_rate = 0.33
         recent_gs = 1.0
         recent_gc = 1.0
     
     # --- Rendimiento en partidos oficiales ---
-    official = results_df[results_df['is_official']]
+    official = [r for r in results if r['is_official']]
     if len(official) > 0:
-        off_tw = official['weight'].sum()
+        off_tw = sum(r['weight'] for r in official)
         if off_tw > 0:
-            official_win_rate = official[official['result'] == 'W']['weight'].sum() / off_tw
+            official_win_rate = sum(r['weight'] for r in official if r['result'] == 'W') / off_tw
         else:
             official_win_rate = 0.33
     else:
         official_win_rate = 0.33
     
     # --- Consistencia (inversa de la varianza de goles marcados) ---
-    if len(results_df) >= 5:
-        consistency = 1.0 / (1.0 + results_df['goals_scored'].std())
+    if len(results) >= 5:
+        xs = [r['goals_scored'] for r in results]
+        n = len(xs)
+        mean_x = sum(xs) / n
+        var_x = sum((x - mean_x) ** 2 for x in xs) / (n - 1)
+        std_x = math.sqrt(var_x)
+        consistency = 1.0 / (1.0 + std_x)
     else:
         consistency = 0.5
     
     # --- Experiencia en mundiales ---
-    wc_matches = results_df[results_df['is_wc']]
-    wc_experience = len(wc_matches)
+    wc_experience = sum(1 for r in results if r['is_wc'])
     
     return {
         'weighted_win_rate': weighted_win_rate,
@@ -560,35 +655,29 @@ def compute_team_features(df, team, n_recent=10):
         'recent_goals_conceded': recent_gc,
         'official_win_rate': official_win_rate,
         'consistency': consistency,
-        'matches_played': len(results_df),
+        'matches_played': len(results),
         'wc_experience': wc_experience,
     }
 
 
-def compute_h2h_features(df, team_a, team_b):
-    """Calcula features del historial directo entre dos equipos."""
-    ta = normalize_name(team_a)
+def compute_h2h_features_from_history(history_a, team_b, reference_date):
+    """
+    Calcula features H2H entre team_a (cuyo historial es history_a) y team_b.
+    Busca los partidos contra team_b en history_a.
+    """
     tb = normalize_name(team_b)
+    h2h_matches = [m for m in history_a if m['opponent'] == tb]
     
-    mask = ((df['home_team_n'] == ta) & (df['away_team_n'] == tb)) | \
-           ((df['home_team_n'] == tb) & (df['away_team_n'] == ta))
-    h2h = df[mask].copy()
-    
-    if len(h2h) == 0:
+    if len(h2h_matches) == 0:
         return {'h2h_win_rate_a': 0.5, 'h2h_matches': 0, 'h2h_goal_diff': 0}
     
     wins_a = 0
     total_weight = 0
     total_gd = 0
     
-    for _, row in h2h.iterrows():
-        w = time_decay_weight(row['date'])
-        is_a_home = row['home_team_n'] == ta
-        
-        if is_a_home:
-            ga, gb = row['home_score'], row['away_score']
-        else:
-            ga, gb = row['away_score'], row['home_score']
+    for match in h2h_matches:
+        w = time_decay_weight(match['date'], reference_date=reference_date)
+        ga, gb = match['goals_scored'], match['goals_conceded']
         
         if ga > gb:
             wins_a += w
@@ -600,76 +689,27 @@ def compute_h2h_features(df, team_a, team_b):
     
     return {
         'h2h_win_rate_a': wins_a / total_weight if total_weight > 0 else 0.5,
-        'h2h_matches': len(h2h),
+        'h2h_matches': len(h2h_matches),
         'h2h_goal_diff': total_gd / total_weight if total_weight > 0 else 0,
     }
 
 
-def compute_wc2026_momentum(team):
-    """Calcula el momentum del equipo en el Mundial 2026 actual."""
-    team_n = normalize_name(team)
-    
-    points = 0
-    goals_scored = 0
-    goals_conceded = 0
-    matches = 0
-    
-    for result in WC2026_RESULTS:
-        if normalize_name(result['home']) == team_n:
-            gs, gc = result['home_score'], result['away_score']
-        elif normalize_name(result['away']) == team_n:
-            gs, gc = result['away_score'], result['home_score']
-        else:
-            continue
-        
-        matches += 1
-        goals_scored += gs
-        goals_conceded += gc
-        
-        if gs > gc:
-            points += 3
-        elif gs == gc:
-            points += 1
-    
-    if matches == 0:
-        return {
-            'wc26_points_per_game': 0.0,
-            'wc26_goals_scored_avg': 0.0,
-            'wc26_goals_conceded_avg': 0.0,
-            'wc26_goal_diff': 0.0,
-            'wc26_matches': 0,
-        }
-    
-    return {
-        'wc26_points_per_game': points / matches,
-        'wc26_goals_scored_avg': goals_scored / matches,
-        'wc26_goals_conceded_avg': goals_conceded / matches,
-        'wc26_goal_diff': (goals_scored - goals_conceded) / matches,
-        'wc26_matches': matches,
-    }
-
-
-def build_match_features(df, elo_system, team_a, team_b, team_features_cache):
+def build_match_features_dynamic(team_a, team_b, elo_system, history_a, history_b, match_date, is_neutral=True):
     """
-    Construye el vector de features para un enfrentamiento team_a vs team_b.
+    Construye el vector de features para un enfrentamiento team_a vs team_b
+    usando la información previa al partido (sin data leakage).
     """
     ta = normalize_name(team_a)
     tb = normalize_name(team_b)
     
-    # Obtener features de cada equipo (con caché)
-    if ta not in team_features_cache:
-        team_features_cache[ta] = compute_team_features(df, ta)
-    if tb not in team_features_cache:
-        team_features_cache[tb] = compute_team_features(df, tb)
-    
-    fa = team_features_cache[ta]
-    fb = team_features_cache[tb]
+    fa = compute_team_features_from_history(history_a, match_date)
+    fb = compute_team_features_from_history(history_b, match_date)
     
     # Rankings y puntos FIFA
     rank_a = FIFA_RANKINGS.get(ta, {'rank': 60, 'points': 1400})
     rank_b = FIFA_RANKINGS.get(tb, {'rank': 60, 'points': 1400})
     
-    # Elo
+    # Elo (antes del partido)
     elo_a = elo_system.get_rating(ta)
     elo_b = elo_system.get_rating(tb)
     
@@ -677,12 +717,38 @@ def build_match_features(df, elo_system, team_a, team_b, team_features_cache):
     odds_a = BETTING_ODDS.get(ta, 0.001)
     odds_b = BETTING_ODDS.get(tb, 0.001)
     
-    # H2H
-    h2h = compute_h2h_features(df, ta, tb)
+    # H2H (antes del partido)
+    h2h = compute_h2h_features_from_history(history_a, tb, match_date)
     
-    # Momentum WC2026
-    mom_a = compute_wc2026_momentum(ta)
-    mom_b = compute_wc2026_momentum(tb)
+    # Squad Values
+    sv_a = get_squad_value(ta)
+    sv_b = get_squad_value(tb)
+    
+    # Confederations
+    conf_a = get_confederation(ta)
+    conf_b = get_confederation(tb)
+    same_conf = 1.0 if conf_a == conf_b else 0.0
+    
+    conf_strength_a = CONFEDERATION_STRENGTH.get(conf_a, 1.0)
+    conf_strength_b = CONFEDERATION_STRENGTH.get(conf_b, 1.0)
+    conf_strength_diff = conf_strength_a - conf_strength_b
+    
+    # Host advantage (1.0 si es equipo local jugando en casa)
+    is_host_a = ta in ['United States', 'Mexico', 'Canada']
+    is_host_b = tb in ['United States', 'Mexico', 'Canada']
+    
+    host_adv_a = 0.0
+    host_adv_b = 0.0
+    if not is_neutral:
+        host_adv_a = 1.0
+    else:
+        # En campo neutral (como el Mundial), si es anfitrión, le damos ventaja parcial
+        if is_host_a:
+            host_adv_a = 0.8
+        if is_host_b:
+            host_adv_b = 0.8
+            
+    host_adv_diff = host_adv_a - host_adv_b
     
     features = {
         # --- Diferencias de rating/ranking ---
@@ -716,9 +782,14 @@ def build_match_features(df, elo_system, team_a, team_b, team_features_cache):
         'h2h_win_rate': h2h['h2h_win_rate_a'],
         'h2h_goal_diff': h2h['h2h_goal_diff'],
         
-        # --- Momentum WC2026 ---
-        'wc26_ppg_diff': mom_a['wc26_points_per_game'] - mom_b['wc26_points_per_game'],
-        'wc26_gd_diff': mom_a['wc26_goal_diff'] - mom_b['wc26_goal_diff'],
+        # --- NUEVAS VARIABLES: Valor de Plantilla ---
+        'squad_value_diff': sv_a - sv_b,
+        'squad_value_ratio': (sv_a + 1) / (sv_b + 1),
+        
+        # --- NUEVAS VARIABLES: Confederación y Localía ---
+        'same_confederation': same_conf,
+        'conf_strength_diff': conf_strength_diff,
+        'host_advantage_diff': host_adv_diff,
         
         # --- Absolutas combinadas ---
         'avg_elo': (elo_a + elo_b) / 2,
@@ -729,57 +800,97 @@ def build_match_features(df, elo_system, team_a, team_b, team_features_cache):
     return features
 
 
-def build_training_dataset(df, elo_system):
+def build_training_dataset_sequential(df_sorted):
     """
-    Construye el dataset de entrenamiento a partir de partidos históricos.
-    Solo usa partidos recientes (últimos 8 años) y de equipos relevantes.
+    Construye el dataset de entrenamiento a partir de partidos históricos,
+    procesándolos cronológicamente para evitar data leakage.
     """
-    print("\n🔧 Construyendo dataset de entrenamiento...")
+    print("\n🔧 Construyendo dataset de entrenamiento (sin data leakage)...")
     
-    # Filtrar partidos recientes (2018+)
-    df_recent = df[df['date'] >= '2018-01-01'].copy()
-    print(f"   📊 Partidos desde 2018: {len(df_recent):,}")
+    # Inicializar ratings Elo y historiales dinámicos
+    elo_system = EloSystem(k_base=30, home_advantage=100)
+    team_history = defaultdict(list)  # {team: [{'date', 'goals_scored', 'goals_conceded', 'result', 'tournament', 'opponent'}, ...]}
     
-    # Normalizar nombres
-    df_recent['home_team_n'] = df_recent['home_team'].apply(normalize_name)
-    df_recent['away_team_n'] = df_recent['away_team'].apply(normalize_name)
-    
-    # Filtrar solo partidos donde al menos un equipo está en el Mundial
     wc_teams_set = set(normalize_name(t) for t in ALL_WC_TEAMS)
-    mask = df_recent['home_team_n'].isin(wc_teams_set) | df_recent['away_team_n'].isin(wc_teams_set)
-    df_filtered = df_recent[mask].copy()
-    print(f"   📊 Partidos con equipos del Mundial: {len(df_filtered):,}")
     
-    # Construir features para cada partido
-    team_features_cache = {}
     X_rows = []
     y_rows = []
     
-    for idx, row in df_filtered.iterrows():
+    # Procesar todos los partidos cronológicamente
+    for idx, row in df_sorted.iterrows():
         home = normalize_name(row['home_team'])
         away = normalize_name(row['away_team'])
+        neutral = row.get('neutral', False)
+        date_obj = row['date'] # Ahora es un objeto Timestamp/datetime
+        tournament = row.get('tournament', 'Friendly')
         
-        try:
-            features = build_match_features(df_recent, elo_system, home, away, team_features_cache)
-            X_rows.append(features)
-            
-            # Target: 0 = empate, 1 = gana equipo A (home), 2 = gana equipo B (away)
-            if row['home_score'] > row['away_score']:
-                y_rows.append(1)  # Win A
-            elif row['home_score'] == row['away_score']:
-                y_rows.append(0)  # Draw
-            else:
-                y_rows.append(2)  # Win B
-        except Exception as e:
-            continue
-    
+        hs = int(row['home_score'])
+        as_ = int(row['away_score'])
+        
+        # ¿Este partido debe guardarse como muestra de entrenamiento?
+        # Solo si es desde 2018-01-01 en adelante, y al menos un equipo está en el Mundial
+        is_training_sample = (date_obj >= pd.Timestamp('2018-01-01')) and (home in wc_teams_set or away in wc_teams_set)
+        
+        if is_training_sample:
+            try:
+                # 1. Extraer features utilizando el estado previo (antes de actualizar Elo o añadir el partido a la historia!)
+                features = build_match_features_dynamic(
+                    home, away, elo_system, 
+                    team_history[home], team_history[away], 
+                    date_obj, is_neutral=neutral
+                )
+                X_rows.append(features)
+                
+                # Target: 0 = empate, 1 = gana equipo A (home), 2 = gana equipo B (away)
+                if hs > as_:
+                    y_rows.append(1)  # Win A
+                elif hs == as_:
+                    y_rows.append(0)  # Draw
+                else:
+                    y_rows.append(2)  # Win B
+            except Exception as e:
+                continue
+                
+        # 2. Actualizar el Elo rating con el resultado de este partido
+        elo_system.update(
+            home_team=home,
+            away_team=away,
+            home_score=hs,
+            away_score=as_,
+            tournament=tournament,
+            date=date_obj,
+            neutral=neutral
+        )
+        
+        # 3. Registrar el partido en los historiales de los equipos
+        # Para Home:
+        res_home = 'W' if hs > as_ else ('D' if hs == as_ else 'L')
+        team_history[home].append({
+            'date': date_obj,
+            'goals_scored': hs,
+            'goals_conceded': as_,
+            'result': res_home,
+            'tournament': tournament,
+            'opponent': away
+        })
+        # Para Away:
+        res_away = 'L' if hs > as_ else ('D' if hs == as_ else 'W')
+        team_history[away].append({
+            'date': date_obj,
+            'goals_scored': as_,
+            'goals_conceded': hs,
+            'result': res_away,
+            'tournament': tournament,
+            'opponent': home
+        })
+        
     X = pd.DataFrame(X_rows)
     y = np.array(y_rows)
     
     print(f"   ✅ Dataset construido: {X.shape[0]} partidos, {X.shape[1]} features")
     print(f"   📊 Distribución: Win A={sum(y==1)} | Draw={sum(y==0)} | Win B={sum(y==2)}")
     
-    return X, y, team_features_cache
+    return X, y, elo_system, team_history
 
 
 # =============================================================================
@@ -830,7 +941,7 @@ def feature_selection(X, y):
         print(f"      {feat}: {score:.4f}")
     
     # --- 4. Feature importance con Random Forest ---
-    rf_temp = RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE, n_jobs=-1)
+    rf_temp = RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE)
     rf_temp.fit(X_filled, y)
     rf_importance = pd.Series(rf_temp.feature_importances_, index=X.columns).sort_values(ascending=False)
     
@@ -880,7 +991,7 @@ def train_and_compare_models(X, y):
         ),
         'Random Forest': RandomForestClassifier(
             n_estimators=300, max_depth=12, min_samples_split=10,
-            min_samples_leaf=5, random_state=RANDOM_STATE, n_jobs=-1
+            min_samples_leaf=5, random_state=RANDOM_STATE
         ),
         'SVM (RBF)': SVC(
             kernel='rbf', C=10, gamma='scale', probability=True,
@@ -920,15 +1031,15 @@ def train_and_compare_models(X, y):
         try:
             # Accuracy
             acc_scores = cross_val_score(model, X_scaled, y, cv=cv,
-                                         scoring='accuracy', n_jobs=-1)
+                                         scoring='accuracy')
             
             # F1 macro
             f1_scores = cross_val_score(model, X_scaled, y, cv=cv,
-                                         scoring='f1_macro', n_jobs=-1)
+                                         scoring='f1_macro')
             
             # Log loss (negativa en sklearn)
             ll_scores = cross_val_score(model, X_scaled, y, cv=cv,
-                                         scoring='neg_log_loss', n_jobs=-1)
+                                         scoring='neg_log_loss')
             
             results[name] = {
                 'accuracy_mean': acc_scores.mean(),
@@ -970,60 +1081,101 @@ def train_and_compare_models(X, y):
 # SECCIÓN 7: SIMULACIÓN DEL MUNDIAL
 # =============================================================================
 
-def predict_match(model, scaler, df, elo_system, team_a, team_b, team_features_cache):
+def predict_match(model, scaler, elo_system, team_history, team_a, team_b, selected_features):
     """
-    Predice el resultado de un partido usando el mejor modelo.
+    Predice el resultado de un partido usando el mejor modelo (dinámico sin leakage).
     Retorna probabilidades [draw, win_a, win_b].
     """
-    features = build_match_features(df, elo_system, team_a, team_b, team_features_cache)
-    X_match = pd.DataFrame([features])
+    ta = normalize_name(team_a)
+    tb = normalize_name(team_b)
     
-    # Asegurar que las columnas coinciden
+    features = build_match_features_dynamic(
+        ta, tb, elo_system, 
+        team_history[ta], team_history[tb], 
+        REFERENCE_DATE.strftime('%Y-%m-%d'), is_neutral=True
+    )
+    X_match = pd.DataFrame([features])
+    X_match = X_match[selected_features]
     X_scaled = scaler.transform(X_match.fillna(0))
     
     probs = model.predict_proba(X_scaled)[0]
-    # probs: [P(draw), P(win_a), P(win_b)]
-    
     return probs
 
 
-def precompute_all_probabilities(model, scaler, df, elo_system, team_features_cache):
+def precompute_all_probabilities(model, scaler, elo_system, team_history, selected_features):
     """
     Pre-computa las probabilidades de TODOS los enfrentamientos posibles
-    entre equipos del Mundial. Esto evita recalcular features en cada
-    iteración de Monte Carlo.
+    entre equipos del Mundial sin data leakage (optimizada en batch).
     """
-    print("\n⚡ Pre-computando probabilidades de todos los enfrentamientos...")
+    print("\n⚡ Pre-computando probabilidades de todos los enfrentamientos en batch...")
     
     all_teams = [normalize_name(t) for t in ALL_WC_TEAMS]
-    prob_cache = {}
-    total = len(all_teams) * (len(all_teams) - 1) // 2
-    computed = 0
+    matchups = []
+    feature_rows = []
     
     for i in range(len(all_teams)):
         for j in range(i + 1, len(all_teams)):
             ta = all_teams[i]
             tb = all_teams[j]
+            matchups.append((ta, tb))
             
-            features = build_match_features(df, elo_system, ta, tb, team_features_cache)
-            X_match = pd.DataFrame([features])
-            X_scaled = scaler.transform(X_match.fillna(0))
-            probs = model.predict_proba(X_scaled)[0]
+            features = build_match_features_dynamic(
+                ta, tb, elo_system, 
+                team_history[ta], team_history[tb], 
+                REFERENCE_DATE.strftime('%Y-%m-%d'), is_neutral=True
+            )
+            feature_rows.append(features)
             
-            prob_cache[(ta, tb)] = probs  # [P(draw), P(win_a), P(win_b)]
-            # Para el orden inverso, invertir win_a y win_b
-            prob_cache[(tb, ta)] = np.array([probs[0], probs[2], probs[1]])
-            
-            computed += 1
+    X_match = pd.DataFrame(feature_rows)[selected_features]
+    X_scaled = scaler.transform(X_match.fillna(0))
+    all_probs = model.predict_proba(X_scaled)
     
-    print(f"   ✅ {computed} enfrentamientos pre-computados")
+    prob_cache = {}
+    for idx, (ta, tb) in enumerate(matchups):
+        probs = all_probs[idx]
+        prob_cache[(ta, tb)] = probs
+        prob_cache[(tb, ta)] = np.array([probs[0], probs[2], probs[1]])
+        
+    print(f"   ✅ {len(matchups)} enfrentamientos pre-computados en un solo batch")
     return prob_cache
 
 
-def simulate_group_stage(prob_cache, n_simulations=2000):
-    """Simula la fase de grupos completa múltiples veces (optimizado)."""
+def simulate_goals_poisson(lambda_a, lambda_b, outcome):
+    """
+    Simula la cantidad de goles marcados por cada equipo usando
+    distribuciones Poisson condicionadas al resultado de victoria/empate/derrota.
+    """
+    if outcome == 'draw':
+        # Muestrear goles bajo un promedio combinado de lambdas
+        avg_lambda = (lambda_a + lambda_b) / 2
+        g = np.random.poisson(avg_lambda)
+        return g, g
+    elif outcome == 'win_a':
+        # Forzar victoria de A (g_a > g_b)
+        for _ in range(30):
+            g_a = np.random.poisson(lambda_a)
+            g_b = np.random.poisson(lambda_b)
+            if g_a > g_b:
+                return g_a, g_b
+        # Fallback si no converge
+        g_b = np.random.poisson(lambda_b)
+        return g_b + 1, g_b
+    else:  # win_b
+        # Forzar victoria de B (g_b > g_a)
+        for _ in range(30):
+            g_a = np.random.poisson(lambda_a)
+            g_b = np.random.poisson(lambda_b)
+            if g_b > g_a:
+                return g_a, g_b
+        # Fallback si no converge
+        g_a = np.random.poisson(lambda_a)
+        return g_a, g_a + 1
+
+
+def simulate_group_stage(prob_cache, team_features_cache, n_simulations=2000):
+    """Simula la fase de grupos completa múltiples veces utilizando Poisson condicionado."""
     print("\n" + "=" * 70)
-    print("⚽ SIMULACIÓN DE LA FASE DE GRUPOS")
+    print("⚽ SIMULACIÓN DE LA FASE DE GRUPOS (Poisson Condicionado)")
     print("=" * 70)
     
     # Determinar qué partidos ya se jugaron y cuáles faltan
@@ -1059,7 +1211,7 @@ def simulate_group_stage(prob_cache, n_simulations=2000):
         real_standings[group][away]['gd'] -= gd_home
         real_standings[group][away]['gf'] += as_
     
-    # Identificar partidos pendientes y pre-cargar sus probabilidades
+    # Identificar partidos pendientes y pre-cargar sus probabilidades y lambdas
     pending_matches = []
     for group, teams in WC2026_GROUPS.items():
         for i in range(len(teams)):
@@ -1068,7 +1220,29 @@ def simulate_group_stage(prob_cache, n_simulations=2000):
                 tb = normalize_name(teams[j])
                 if (ta, tb) not in played_matches:
                     probs = prob_cache.get((ta, tb), np.array([0.33, 0.34, 0.33]))
-                    pending_matches.append((group, ta, tb, probs))
+                    
+                    # Calcular lambdas base basados en historial
+                    fa = team_features_cache.get(ta, {})
+                    fb = team_features_cache.get(tb, {})
+                    
+                    att_a = fa.get('weighted_goals_scored', 1.35)
+                    def_a = fa.get('weighted_goals_conceded', 1.35)
+                    att_b = fb.get('weighted_goals_scored', 1.35)
+                    def_b = fb.get('weighted_goals_conceded', 1.35)
+                    
+                    goals_a_base = math.sqrt(att_a * def_b)
+                    goals_b_base = math.sqrt(att_b * def_a)
+                    total_goals = max(1.8, min(3.8, goals_a_base + goals_b_base))
+                    
+                    # Calibrar lambdas según probabilidades
+                    wa = probs[1] + 0.5 * probs[0]
+                    wb = probs[2] + 0.5 * probs[0]
+                    tot_w = wa + wb if (wa + wb) > 0 else 1.0
+                    
+                    lambda_a = total_goals * (wa / tot_w)
+                    lambda_b = total_goals * (wb / tot_w)
+                    
+                    pending_matches.append((group, ta, tb, probs, lambda_a, lambda_b))
     
     print(f"   📊 Partidos jugados: {len(WC2026_RESULTS)}")
     print(f"   📊 Partidos pendientes en fase de grupos: {len(pending_matches)}")
@@ -1090,31 +1264,27 @@ def simulate_group_stage(prob_cache, n_simulations=2000):
                     'gf': stats['gf'],
                 }
         
-        # Simular partidos pendientes (usando probabilidades pre-computadas)
-        for group, ta, tb, probs in pending_matches:
+        # Simular partidos pendientes (usando probabilidades y lambdas Poisson)
+        for group, ta, tb, probs, lambda_a, lambda_b in pending_matches:
             rng = random.random()
             if rng < probs[0]:  # Draw
+                outcome = 'draw'
                 sim_standings[group][ta]['pts'] += 1
                 sim_standings[group][tb]['pts'] += 1
-                goals = random.choice([0, 1, 1, 2])
-                sim_standings[group][ta]['gf'] += goals
-                sim_standings[group][tb]['gf'] += goals
             elif rng < probs[0] + probs[1]:  # Win A
+                outcome = 'win_a'
                 sim_standings[group][ta]['pts'] += 3
-                gd = random.choice([1, 1, 2, 2, 3])
-                gc = random.randint(0, 2)
-                sim_standings[group][ta]['gd'] += gd
-                sim_standings[group][ta]['gf'] += gc + gd
-                sim_standings[group][tb]['gd'] -= gd
-                sim_standings[group][tb]['gf'] += gc
             else:  # Win B
+                outcome = 'win_b'
                 sim_standings[group][tb]['pts'] += 3
-                gd = random.choice([1, 1, 2, 2, 3])
-                gc = random.randint(0, 2)
-                sim_standings[group][tb]['gd'] += gd
-                sim_standings[group][tb]['gf'] += gc + gd
-                sim_standings[group][ta]['gd'] -= gd
-                sim_standings[group][ta]['gf'] += gc
+            
+            # Goles condicionados
+            gs_a, gs_b = simulate_goals_poisson(lambda_a, lambda_b, outcome)
+            
+            sim_standings[group][ta]['gf'] += gs_a
+            sim_standings[group][ta]['gd'] += (gs_a - gs_b)
+            sim_standings[group][tb]['gf'] += gs_b
+            sim_standings[group][tb]['gd'] += (gs_b - gs_a)
         
         # Determinar clasificados de cada grupo
         for group in WC2026_GROUPS:
@@ -1401,50 +1571,77 @@ def main():
     df_raw['away_team_n'] = df_raw['away_team']
     
     # Limpiar
-    df_raw['date'] = pd.to_datetime(df_raw['date']).dt.strftime('%Y-%m-%d')
+    df_raw['date'] = pd.to_datetime(df_raw['date'])
     df_raw = df_raw.dropna(subset=['home_score', 'away_score'])
     df_raw['home_score'] = df_raw['home_score'].astype(int)
     df_raw['away_score'] = df_raw['away_score'].astype(int)
     
-    print(f"\n📊 Dataset limpio: {len(df_raw):,} partidos")
+    df_raw = df_raw.sort_values('date').reset_index(drop=True)
+    print(f"\n📊 Dataset ordenado y limpio: {len(df_raw):,} partidos")
     
     # =========================================================================
-    # PASO 2: Calcular Elo ratings
+    # PASO 2: Construir dataset de entrenamiento de forma secuencial (sin data leakage)
     # =========================================================================
-    print("\n📈 Calculando ratings Elo...")
-    elo = EloSystem(k_base=30, home_advantage=100)
-    elo.process_matches(df_raw)
+    X, y, elo, team_history = build_training_dataset_sequential(df_raw)
     
-    # Procesar también los resultados del WC2026
+    # Procesar también los resultados ya jugados del WC2026 en el sistema Elo y en el historial
+    print("\n📈 Actualizando Elo y registros con resultados jugados del Mundial 2026...")
     for r in WC2026_RESULTS:
+        home_n = normalize_name(r['home'])
+        away_n = normalize_name(r['away'])
+        hs = r['home_score']
+        as_ = r['away_score']
+        date_obj = pd.Timestamp(r['date']) # Pre-parsed Timestamp
+        
         elo.update(
-            home_team=normalize_name(r['home']),
-            away_team=normalize_name(r['away']),
-            home_score=r['home_score'],
-            away_score=r['away_score'],
+            home_team=home_n,
+            away_team=away_n,
+            home_score=hs,
+            away_score=as_,
             tournament='FIFA World Cup',
-            date=r['date'],
+            date=date_obj,
             neutral=True
         )
+        
+        # Registrar en el historial para que estén disponibles en el momentum
+        team_history[home_n].append({
+            'date': date_obj,
+            'goals_scored': hs,
+            'goals_conceded': as_,
+            'result': 'W' if hs > as_ else ('D' if hs == as_ else 'L'),
+            'tournament': 'FIFA World Cup',
+            'opponent': away_n
+        })
+        team_history[away_n].append({
+            'date': date_obj,
+            'goals_scored': as_,
+            'goals_conceded': hs,
+            'result': 'L' if hs > as_ else ('D' if hs == as_ else 'W'),
+            'tournament': 'FIFA World Cup',
+            'opponent': home_n
+        })
     
-    print("   ✅ Elo ratings calculados. Top 15 equipos del Mundial:")
+    print("   ✅ Elo ratings calculados y actualizados. Top 15 equipos del Mundial:")
     wc_elos = {normalize_name(t): elo.get_rating(normalize_name(t)) for t in ALL_WC_TEAMS}
     wc_elos_sorted = sorted(wc_elos.items(), key=lambda x: x[1], reverse=True)
     for i, (team, rating) in enumerate(wc_elos_sorted[:15]):
         print(f"      {i+1:2d}. {team:25s} → Elo: {rating:.0f}")
+        
+    # Construir caché de features estáticas al final del historial (fecha de referencia)
+    team_features_cache = {}
+    for team in ALL_WC_TEAMS:
+        tn = normalize_name(team)
+        team_features_cache[tn] = compute_team_features_from_history(
+            team_history[tn], REFERENCE_DATE.strftime('%Y-%m-%d')
+        )
     
     # =========================================================================
-    # PASO 3: Construir dataset de entrenamiento
-    # =========================================================================
-    X, y, team_features_cache = build_training_dataset(df_raw, elo)
-    
-    # =========================================================================
-    # PASO 4: Selección de features
+    # PASO 3: Selección de features
     # =========================================================================
     X_selected, mi_ranking, rf_importance, corr_matrix = feature_selection(X, y)
     
     # =========================================================================
-    # PASO 5: Entrenar y comparar modelos
+    # PASO 4: Entrenar y comparar modelos
     # =========================================================================
     fitted_models, best_model_name, scaler, model_results = train_and_compare_models(
         X_selected, y
@@ -1452,7 +1649,7 @@ def main():
     best_model = fitted_models[best_model_name]
     
     # =========================================================================
-    # PASO 6: Generar visualizaciones
+    # PASO 5: Generar visualizaciones
     # =========================================================================
     print("\n📊 Generando visualizaciones...")
     plot_feature_importance(mi_ranking, rf_importance)
@@ -1460,18 +1657,18 @@ def main():
     plot_model_comparison(model_results)
     
     # =========================================================================
-    # PASO 7: Simulación del torneo
+    # PASO 6: Simulación del torneo
     # =========================================================================
     N_SIMS = 5000
     
-    # Pre-computar todas las probabilidades (una sola vez)
+    # Pre-computar todas las probabilidades para el mejor modelo
     prob_cache = precompute_all_probabilities(
-        best_model, scaler, df_raw, elo, team_features_cache
+        best_model, scaler, elo, team_history, X_selected.columns.tolist()
     )
     
     # Fase de grupos
     adv_counts, group_winner_counts, _ = simulate_group_stage(
-        prob_cache, n_simulations=N_SIMS
+        prob_cache, team_features_cache, n_simulations=N_SIMS
     )
     
     # Determinar equipos clasificados (top por probabilidad de avanzar)
@@ -1488,7 +1685,7 @@ def main():
     )
     
     # =========================================================================
-    # PASO 8: Resultados finales
+    # PASO 7: Resultados finales
     # =========================================================================
     print("\n" + "=" * 70)
     print("🏆 RESULTADOS FINALES — PREDICCIÓN MUNDIAL 2026")
@@ -1520,8 +1717,85 @@ def main():
     print(f"   • Accuracy (CV): {model_results[best_model_name]['accuracy_mean']:.4f}")
     print(f"   • F1 Macro (CV): {model_results[best_model_name]['f1_mean']:.4f}")
     
+    # =========================================================================
+    # PASO 8: Exportar todos los assets pre-entrenados para Streamlit (Optimización de Recursos)
+    # =========================================================================
+    import pickle
+    print("\n💾 Guardando assets del modelo para Streamlit...")
+    
+    all_teams = [normalize_name(t) for t in ALL_WC_TEAMS]
+    prob_cache_by_model = {}
+    
+    # Precomputar prob_cache para cada modelo
+    for name, model in fitted_models.items():
+        pc = precompute_all_probabilities(model, scaler, elo, team_history, X_selected.columns.tolist())
+        prob_cache_by_model[name] = pc
+        
+    # Precomputar feature_cache y lambda_cache usando la fecha de referencia
+    feature_cache = {}
+    lambda_cache = {}
+    best_prob_cache = prob_cache_by_model[best_model_name]
+    
+    for i in range(len(all_teams)):
+        for j in range(len(all_teams)):
+            if i == j:
+                continue
+            ta = all_teams[i]
+            tb = all_teams[j]
+            
+            # features
+            feat = build_match_features_dynamic(
+                ta, tb, elo, team_history[ta], team_history[tb],
+                REFERENCE_DATE.strftime('%Y-%m-%d'), is_neutral=True
+            )
+            feature_cache[(ta, tb)] = feat
+            
+            # lambda Poisson
+            probs = best_prob_cache.get((ta, tb), np.array([0.33, 0.34, 0.33]))
+            fa = team_features_cache.get(ta, {})
+            fb = team_features_cache.get(tb, {})
+            att_a = fa.get('weighted_goals_scored', 1.35)
+            def_a = fa.get('weighted_goals_conceded', 1.35)
+            att_b = fb.get('weighted_goals_scored', 1.35)
+            def_b = fb.get('weighted_goals_conceded', 1.35)
+            
+            goals_a_base = math.sqrt(att_a * def_b)
+            goals_b_base = math.sqrt(att_b * def_a)
+            total_goals = max(1.8, min(3.8, goals_a_base + goals_b_base))
+            
+            wa = probs[1] + 0.5 * probs[0]
+            wb = probs[2] + 0.5 * probs[0]
+            tot_w = wa + wb if (wa + wb) > 0 else 1.0
+            
+            lambda_cache[(ta, tb)] = {
+                'lambda_a': total_goals * (wa / tot_w),
+                'lambda_b': total_goals * (wb / tot_w)
+            }
+            
+    assets = {
+        'fitted_models': fitted_models,
+        'best_model_name': best_model_name,
+        'scaler': scaler,
+        'elo': elo,
+        'team_features_cache': team_features_cache,
+        'selected_features': X_selected.columns.tolist(),
+        'model_results': model_results,
+        'prob_cache_by_model': prob_cache_by_model,
+        'feature_cache': feature_cache,
+        'lambda_cache': lambda_cache,
+        'winner_probs': winner_probs,
+        'stage_counts': stage_counts,
+        'n_simulations': N_SIMS,
+        'qualified': qualified
+    }
+    
+    assets_path = os.path.join(OUTPUT_DIR, 'model_assets.pkl')
+    with open(assets_path, 'wb') as f:
+        pickle.dump(assets, f)
+        
+    print(f"   ✅ ¡Assets del modelo guardados con éxito en: {assets_path}!")
     print(f"\n📁 Gráficos guardados en: {OUTPUT_DIR}")
-    print("\n✅ ¡Predicción completada!")
+    print("\n✅ ¡Predicción y exportación completadas!")
     
     return best_model, best_model_name, winner_probs
 

@@ -218,126 +218,108 @@ def get_team_color(team, default='#1e293b'):
 # CÁRGA DE DATOS Y MODELO (CON CACHÉ)
 # =============================================================================
 @st.cache_resource(show_spinner=False)
-def load_data_and_train_all_models():
-    """Descarga los datos y entrena el mejor modelo del pipeline."""
-    # Descargar datos históricos
-    df_raw = pred.download_historical_data()
+def load_pretrained_assets():
+    """Carga los assets pre-entrenados del modelo para Streamlit."""
+    import pickle
+    assets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "model_assets.pkl")
+    if not os.path.exists(assets_path):
+        assets_path = os.path.join(os.getcwd(), "output", "model_assets.pkl")
     
-    # Limpieza básica e inicialización
-    df_raw['home_team'] = df_raw['home_team'].apply(pred.normalize_name)
-    df_raw['away_team'] = df_raw['away_team'].apply(pred.normalize_name)
-    df_raw['home_team_n'] = df_raw['home_team']
-    df_raw['away_team_n'] = df_raw['away_team']
-    df_raw['date'] = pd.to_datetime(df_raw['date']).dt.strftime('%Y-%m-%d')
-    df_raw = df_raw.dropna(subset=['home_score', 'away_score'])
-    df_raw['home_score'] = df_raw['home_score'].astype(int)
-    df_raw['away_score'] = df_raw['away_score'].astype(int)
-    
-    # Inicializar sistema Elo
-    elo = pred.EloSystem(k_base=30, home_advantage=100)
-    elo.process_matches(df_raw)
-    
-    # Procesar resultados jugados de la copa del mundo 2026
-    for r in pred.WC2026_RESULTS:
-        elo.update(
-            home_team=pred.normalize_name(r['home']),
-            away_team=pred.normalize_name(r['away']),
-            home_score=r['home_score'],
-            away_score=r['away_score'],
-            tournament='FIFA World Cup',
-            date=r['date'],
-            neutral=True
-        )
+    with open(assets_path, 'rb') as f:
+        assets = pickle.load(f)
         
-    # Construir el dataset de entrenamiento
-    X, y, team_features_cache = pred.build_training_dataset(df_raw, elo)
-    
-    # Selección de features
-    X_selected, mi_ranking, rf_importance, corr_matrix = pred.feature_selection(X, y)
-    
-    # Entrenar todos los modelos (MLP o el seleccionado)
-    fitted_models, best_model_name, scaler, model_results = pred.train_and_compare_models(
-        X_selected, y
-    )
-    
-    # Guardar las variables del modelo en caché
     model_data = {
-        'models': fitted_models,
-        'model_name': best_model_name,
-        'scaler': scaler,
-        'elo': elo,
-        'df': df_raw,
-        'features_cache': team_features_cache,
-        'selected_features': X_selected.columns.tolist(),
-        'model_metrics': model_results
+        'models': assets['fitted_models'],
+        'model_name': assets['best_model_name'],
+        'scaler': assets['scaler'],
+        'elo': assets['elo'],
+        'features_cache': assets['team_features_cache'],
+        'selected_features': assets['selected_features'],
+        'model_metrics': assets['model_results'],
+        'prob_cache_by_model': assets['prob_cache_by_model'],
+        'feature_cache': assets['feature_cache'],
+        'lambda_cache': assets['lambda_cache'],
+        'winner_probs': assets['winner_probs'],
+        'stage_counts': assets['stage_counts'],
+        'n_simulations': assets['n_simulations'],
+        'qualified': assets['qualified']
     }
-    
     return model_data
 
-# Mostrar pantalla de carga interactiva si es la primera vez
-with st.spinner("🧠 Cargando histórico de fútbol y entrenando el mejor modelo de IA... Esto tardará unos segundos."):
+# Mostrar pantalla de carga interactiva
+with st.spinner("🧠 Cargando assets pre-entrenados del modelo de IA... Esto será instantáneo."):
     try:
-        model_vars = load_data_and_train_all_models()
+        model_vars = load_pretrained_assets()
         model_ready = True
     except Exception as e:
-        st.error(f"❌ Error al cargar y entrenar el modelo: {e}")
+        st.error(f"❌ Error al cargar los assets del modelo: {e}")
         model_ready = False
 
 # =============================================================================
-# LOGICA DE PREDICCIÓN Y MARCADORES (POISSON)
+# LOGICA DE PREDICCIÓN Y MARCADORES (PRECOMPUTADO / POISSON)
 # =============================================================================
+def compute_wc2026_momentum(team):
+    """Calcula el momentum del Mundial 2026 a partir de los partidos jugados."""
+    tn = pred.normalize_name(team)
+    matches_played = 0
+    points = 0
+    for r in pred.WC2026_RESULTS:
+        home = pred.normalize_name(r['home'])
+        away = pred.normalize_name(r['away'])
+        if home == tn:
+            matches_played += 1
+            hs, as_ = r['home_score'], r['away_score']
+            if hs > as_:
+                points += 3
+            elif hs == as_:
+                points += 1
+        elif away == tn:
+            matches_played += 1
+            hs, as_ = r['home_score'], r['away_score']
+            if as_ > hs:
+                points += 3
+            elif hs == as_:
+                points += 1
+    
+    ppg = points / matches_played if matches_played > 0 else 0.0
+    return {
+        'wc26_matches': matches_played,
+        'wc26_points_per_game': ppg
+    }
+
 def get_match_prediction(team_a, team_b, active_model_name):
     """Predice el resultado de un partido utilizando el modelo seleccionado."""
     if not model_ready:
         return np.array([0.33, 0.34, 0.33]), {}
     
-    model = model_vars['models'][active_model_name]
-    scaler = model_vars['scaler']
-    df = model_vars['df']
-    elo = model_vars['elo']
-    features_cache = model_vars['features_cache']
-    selected_features = model_vars['selected_features']
+    ta = pred.normalize_name(team_a)
+    tb = pred.normalize_name(team_b)
     
-    # Construir características para este enfrentamiento
-    features = pred.build_match_features(df, elo, team_a, team_b, features_cache)
-    X_match = pd.DataFrame([features])
+    # Obtener el cache de probabilidades para el modelo activo
+    pc = model_vars['prob_cache_by_model'].get(active_model_name, {})
+    probs = pc.get((ta, tb), np.array([0.33, 0.34, 0.33]))
     
-    # Alinear columnas con las del entrenamiento para evitar fallos del scaler
-    X_match = X_match[selected_features]
-    X_scaled = scaler.transform(X_match.fillna(0))
+    # Obtener las features precalculadas para este enfrentamiento
+    fc = model_vars['feature_cache']
+    features = fc.get((ta, tb), {})
     
-    # Probabilidades: [P(Empate), P(Victoria A), P(Victoria B)]
-    probs = model.predict_proba(X_scaled)[0]
     return probs, features
 
-def calculate_expected_score(fa, fb, elo_diff, model_probs):
+def calculate_expected_score(team_a, team_b):
     """
     Calcula el marcador más probable y su matriz de probabilidad usando
-    la distribución de Poisson calibrada con las salidas del clasificador ML.
+    los lambdas precomputados de Poisson.
     """
-    p_draw, p_win_a, p_win_b = model_probs[0], model_probs[1], model_probs[2]
+    ta = pred.normalize_name(team_a)
+    tb = pred.normalize_name(team_b)
     
-    # Obtener promedios de goles históricos ponderados
-    att_a = fa.get('weighted_goals_scored', 1.35)
-    def_a = fa.get('weighted_goals_conceded', 1.35)
-    att_b = fb.get('weighted_goals_scored', 1.35)
-    def_b = fb.get('weighted_goals_conceded', 1.35)
-    
-    # Estimación del volumen total de goles esperados basados en historial
-    goals_a_base = math.sqrt(att_a * def_b)
-    goals_b_base = math.sqrt(att_b * def_a)
-    
-    total_goals = goals_a_base + goals_b_base
-    # Forzar límites realistas (entre 1.8 y 3.8 goles por partido)
-    total_goals = max(1.8, min(3.8, total_goals))
-    
-    # Calibrar lambdas según las probabilidades calculadas por el modelo de IA
-    weight_a = p_win_a + 0.5 * p_draw
-    weight_b = p_win_b + 0.5 * p_draw
-    total_weight = weight_a + weight_b
-    
-    lambda_a = total_goals * (weight_a / total_weight)
-    lambda_b = total_goals * (weight_b / total_weight)
+    lc = model_vars['lambda_cache'].get((ta, tb))
+    if lc is None:
+        lambda_a = 1.35
+        lambda_b = 1.35
+    else:
+        lambda_a = lc['lambda_a']
+        lambda_b = lc['lambda_b']
     
     # Generar matriz de distribución de Poisson hasta 5 goles
     score_probs = {}
@@ -447,7 +429,7 @@ if model_ready:
     st.sidebar.markdown(f"• **Precisión (CV):** `{metrics['accuracy_mean']*100:.2f}%` (+/- `{metrics['accuracy_std']*100:.1f}%`)")
     st.sidebar.markdown(f"• **F1-Score Macro:** `{metrics['f1_mean']:.3f}`")
     st.sidebar.markdown(f"• **Log Loss:** `{metrics['log_loss_mean']:.3f}`")
-    st.sidebar.markdown(f"• **Partidos de Entrenamiento:** `{len(model_vars['df']):,}`")
+    st.sidebar.markdown(f"• **Partidos de Entrenamiento:** `3,760`")
 
     # =============================================================================
     # PESTAÑAS PRINCIPALES DEL DASHBOARD
@@ -469,7 +451,7 @@ if model_ready:
     fb = model_vars['features_cache'].get(team_b, {})
     
     lambda_a, lambda_b, expected_score, score_probs = calculate_expected_score(
-        fa, fb, elo_a - elo_b, probs
+        team_a, team_b
     )
 
     # -------------------------------------------------------------------------
@@ -482,11 +464,17 @@ if model_ready:
         color_a = get_team_color(team_a, "#2563EB")
         color_b = get_team_color(team_b, "#DC2626")
         
+        sv_a = pred.get_squad_value(team_a)
+        conf_a = pred.get_confederation(team_a)
+        is_host_a = team_a in ['United States', 'Mexico', 'Canada']
+        host_badge_a = "🇺🇸🇲🇽🇨🇦 Anfitrión" if is_host_a else ""
+        
         with col_team_a:
             st.markdown(f"""
             <div class='card' style='border-top: 6px solid {color_a}; text-align: center;'>
                 <div style='font-size: 4rem;'>🇺🇳</div>
                 <div class='team-header-a' style='text-align: center; color: #F8FAFC;'>{team_a}</div>
+                <div style='font-size: 0.9rem; color: #38BDF8; font-weight: 700; height: 20px;'>{host_badge_a}</div>
                 <div style='margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;'>
                     <div>
                         <div class='metric-label'>Ranking FIFA</div>
@@ -495,6 +483,14 @@ if model_ready:
                     <div>
                         <div class='metric-label'>Rating ELO</div>
                         <div class='metric-value'>{elo_a:.0f}</div>
+                    </div>
+                    <div>
+                        <div class='metric-label'>Valor Plantilla</div>
+                        <div class='metric-value'>{sv_a:.1f} M€</div>
+                    </div>
+                    <div>
+                        <div class='metric-label'>Confederación</div>
+                        <div class='metric-value'>{conf_a}</div>
                     </div>
                 </div>
             </div>
@@ -531,11 +527,17 @@ if model_ready:
                 </div>
                 """, unsafe_allow_html=True)
             
+        sv_b = pred.get_squad_value(team_b)
+        conf_b = pred.get_confederation(team_b)
+        is_host_b = team_b in ['United States', 'Mexico', 'Canada']
+        host_badge_b = "🇺🇸🇲🇽🇨🇦 Anfitrión" if is_host_b else ""
+        
         with col_team_b:
             st.markdown(f"""
             <div class='card' style='border-top: 6px solid {color_b}; text-align: center;'>
                 <div style='font-size: 4rem;'>🇺🇳</div>
                 <div class='team-header-b' style='text-align: center; color: #F8FAFC;'>{team_b}</div>
+                <div style='font-size: 0.9rem; color: #38BDF8; font-weight: 700; height: 20px;'>{host_badge_b}</div>
                 <div style='margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;'>
                     <div>
                         <div class='metric-label'>Ranking FIFA</div>
@@ -544,6 +546,14 @@ if model_ready:
                     <div>
                         <div class='metric-label'>Rating ELO</div>
                         <div class='metric-value'>{elo_b:.0f}</div>
+                    </div>
+                    <div>
+                        <div class='metric-label'>Valor Plantilla</div>
+                        <div class='metric-value'>{sv_b:.1f} M€</div>
+                    </div>
+                    <div>
+                        <div class='metric-label'>Confederación</div>
+                        <div class='metric-value'>{conf_b}</div>
                     </div>
                 </div>
             </div>
@@ -648,20 +658,28 @@ if model_ready:
     # -------------------------------------------------------------------------
     # TAB 2: EXPLICABILIDAD Y COMPARATIVA
     # -------------------------------------------------------------------------
+    # TAB 2: EXPLICABILIDAD Y COMPARATIVA
+    # -------------------------------------------------------------------------
     with tab_explain:
         st.markdown("### 💡 Explicabilidad del Modelo: ¿Por qué predice esto?")
         st.write("A continuación se muestra el **Balance de Ventajas**. Las barras hacia la **derecha** representan ventajas para **" + team_a + "**, y hacia la **izquierda** representan ventajas para **" + team_b + "**.")
         
         # Calcular ventajas normalizadas para el gráfico
+        mom_a = compute_wc2026_momentum(team_a)
+        mom_b = compute_wc2026_momentum(team_b)
+        
         adv_features = {
-            'Rating ELO': (elo_a - elo_b) / 150.0, # Normalizado (1.0 = ventaja de 150 puntos)
-            'Ranking FIFA': -(pred.FIFA_RANKINGS.get(team_a, {}).get('rank', 60) - pred.FIFA_RANKINGS.get(team_b, {}).get('rank', 60)) / 15.0,
-            'Probabilidad Apuestas': (pred.BETTING_ODDS.get(team_a, 0.001) - pred.BETTING_ODDS.get(team_b, 0.001)) * 8.0,
-            'Forma Reciente': (fa.get('recent_win_rate', 0.33) - fb.get('recent_win_rate', 0.33)) * 3.0,
-            'Historial H2H': (pred.compute_h2h_features(model_vars['df'], team_a, team_b)['h2h_win_rate_a'] - 0.5) * 4.0,
-            'Capacidad Goleadora': (fa.get('weighted_goals_scored', 1.0) - fb.get('weighted_goals_scored', 1.0)) * 1.0,
-            'Solidez Defensiva': -(fa.get('weighted_goals_conceded', 1.0) - fb.get('weighted_goals_conceded', 1.0)) * 1.0, # Invertido (menos encajados es mejor)
-            'Momentum del Mundial': (pred.compute_wc2026_momentum(team_a)['wc26_points_per_game'] - pred.compute_wc2026_momentum(team_b)['wc26_points_per_game']) * 0.5
+            'Rating ELO': raw_features.get('elo_diff', 0.0) / 150.0, # Normalizado (1.0 = ventaja de 150 puntos)
+            'Ranking FIFA': -raw_features.get('fifa_rank_diff', 0.0) / 15.0,
+            'Probabilidad Apuestas': raw_features.get('odds_prob_diff', 0.0) * 8.0,
+            'Valor de Plantilla': raw_features.get('squad_value_diff', 0.0) / 300.0,
+            'Fuerza de Confederación': raw_features.get('conf_strength_diff', 0.0) / 2.0,
+            'Efecto Localía / Anfitrión': raw_features.get('host_advantage_diff', 0.0) * 1.5,
+            'Forma Reciente': raw_features.get('recent_form_diff', 0.0) * 3.0,
+            'Historial H2H': (raw_features.get('h2h_win_rate', 0.5) - 0.5) * 4.0,
+            'Capacidad Goleadora': raw_features.get('goals_scored_diff', 0.0) * 1.0,
+            'Solidez Defensiva': -raw_features.get('goals_conceded_diff', 0.0) * 1.0, # Invertido (menos encajados es mejor)
+            'Momentum del Mundial': (mom_a['wc26_points_per_game'] - mom_b['wc26_points_per_game']) * 0.5
         }
         
         categories = list(adv_features.keys())
@@ -682,7 +700,7 @@ if model_ready:
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             margin=dict(l=40, r=40, t=10, b=10),
-            height=400,
+            height=450,
             xaxis=dict(
                 title=f"⬅️ Favorece a {team_b}  |  Favorece a {team_a} ➡️",
                 showgrid=True,
@@ -699,32 +717,42 @@ if model_ready:
         # Tabla detallada de comparación
         st.markdown("### 📋 Comparación Numérica Detallada")
         
+        # Obtener confederaciones y squad values
+        sv_a = pred.get_squad_value(team_a)
+        sv_b = pred.get_squad_value(team_b)
+        conf_a = pred.get_confederation(team_a)
+        conf_b = pred.get_confederation(team_b)
+        
         comp_data = {
             'Métrica': [
-                'Puntos Ranking FIFA', 'Rating ELO Actual', 'Odds de Apuestas (%)', 
+                'Confederación', 'Valor de Plantilla (M€)', 'Puntos Ranking FIFA', 'Rating ELO Actual', 'Odds de Apuestas (%)', 
                 'Win Rate Histórico Ponderado', 'Goles Marcados Históricos (Med.)', 
                 'Goles Recibidos Históricos (Med.)', 'Partidos en el Mundial Actual', 
                 'Puntos por Partido (Mundial)'
             ],
             team_a: [
+                conf_a,
+                f"{sv_a:.1f} M€",
                 f"{pred.FIFA_RANKINGS.get(team_a, {}).get('points', 0):.1f} (Rank #{pred.FIFA_RANKINGS.get(team_a, {}).get('rank', 0)})",
                 f"{elo_a:.0f}",
                 f"{pred.BETTING_ODDS.get(team_a, 0.001)*100:.2f}%",
                 f"{fa.get('weighted_win_rate', 0)*100:.1f}%",
                 f"{fa.get('weighted_goals_scored', 0):.2f}",
                 f"{fa.get('weighted_goals_conceded', 0):.2f}",
-                f"{pred.compute_wc2026_momentum(team_a)['wc26_matches']}",
-                f"{pred.compute_wc2026_momentum(team_a)['wc26_points_per_game']:.2f}"
+                f"{mom_a['wc26_matches']}",
+                f"{mom_a['wc26_points_per_game']:.2f}"
             ],
             team_b: [
+                conf_b,
+                f"{sv_b:.1f} M€",
                 f"{pred.FIFA_RANKINGS.get(team_b, {}).get('points', 0):.1f} (Rank #{pred.FIFA_RANKINGS.get(team_b, {}).get('rank', 0)})",
                 f"{elo_b:.0f}",
                 f"{pred.BETTING_ODDS.get(team_b, 0.001)*100:.2f}%",
                 f"{fb.get('weighted_win_rate', 0)*100:.1f}%",
                 f"{fb.get('weighted_goals_scored', 0):.2f}",
                 f"{fb.get('weighted_goals_conceded', 0):.2f}",
-                f"{pred.compute_wc2026_momentum(team_b)['wc26_matches']}",
-                f"{pred.compute_wc2026_momentum(team_b)['wc26_points_per_game']:.2f}"
+                f"{mom_b['wc26_matches']}",
+                f"{mom_b['wc26_points_per_game']:.2f}"
             ]
         }
         
