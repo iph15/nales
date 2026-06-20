@@ -347,6 +347,77 @@ def fetch_live_odds(api_key):
         pass
     return {}
 
+def generate_stable_mock_odds(team_a, team_b, p_draw, p_win_a, p_win_b):
+    """Genera cuotas realistas y estables para varias casas de apuestas basadas en probabilidades de la IA."""
+    bookmakers = {
+        'Bet365': {'margin': 0.045, 'seed_offset': 1},
+        'Codere': {'margin': 0.060, 'seed_offset': 2},
+        'Bwin': {'margin': 0.050, 'seed_offset': 3},
+        '1xBet': {'margin': 0.035, 'seed_offset': 4}
+    }
+    
+    match_odds = {}
+    for bm_name, bm_cfg in bookmakers.items():
+        margin = bm_cfg['margin']
+        offset = bm_cfg['seed_offset']
+        
+        # Generar un seed pseudo-aleatorio basado en los nombres de los equipos
+        # para que las cuotas sean estables entre recargas de la página
+        val_str = f"{team_a}_{team_b}_{bm_name}_{offset}"
+        seed_val = sum(ord(c) for c in val_str)
+        
+        # Variación pseudo-aleatoria determinista para simular diferencias del mercado (90% a 110%)
+        var_a = 0.90 + ((seed_val % 21) / 100.0)
+        var_draw = 0.90 + (((seed_val + 5) % 21) / 100.0)
+        var_b = 0.90 + (((seed_val + 10) % 21) / 100.0)
+        
+        p_win_a_mod = p_win_a * var_a
+        p_draw_mod = p_draw * var_draw
+        p_win_b_mod = p_win_b * var_b
+        
+        # Normalizar a 1 + margen de la casa de apuestas
+        sum_mods = p_win_a_mod + p_draw_mod + p_win_b_mod
+        if sum_mods > 0:
+            target_sum = 1.0 + margin
+            p_win_a_final = (p_win_a_mod / sum_mods) * target_sum
+            p_draw_final = (p_draw_mod / sum_mods) * target_sum
+            p_win_b_final = (p_win_b_mod / sum_mods) * target_sum
+        else:
+            p_win_a_final = p_win_a * (1.0 + margin)
+            p_draw_final = p_draw * (1.0 + margin)
+            p_win_b_final = p_win_b * (1.0 + margin)
+            
+        odd_a = round(1.0 / p_win_a_final, 2) if p_win_a_final > 0 else 99.0
+        odd_draw = round(1.0 / p_draw_final, 2) if p_draw_final > 0 else 99.0
+        odd_b = round(1.0 / p_win_b_final, 2) if p_win_b_final > 0 else 99.0
+        
+        match_odds[bm_name] = {
+            'home': max(1.01, odd_a),
+            'draw': max(1.01, odd_draw),
+            'away': max(1.01, odd_b)
+        }
+    return match_odds
+
+def get_market_odd(bet_type, is_a_fav, bm_odds, p_under_3_5, p_over_1_5, p_both_score_no):
+    """Calcula u obtiene la cuota para un mercado de apuesta específico a partir de las de ganador."""
+    if "Gana Favorito" in bet_type:
+        odd = bm_odds['home'] if is_a_fav else bm_odds['away']
+        return round(odd, 2)
+    elif "Doble Oportunidad" in bet_type:
+        odd_fav = bm_odds['home'] if is_a_fav else bm_odds['away']
+        odd_draw = bm_odds['draw']
+        if odd_fav > 0 and odd_draw > 0:
+            implied_p = (1.0 / odd_fav) + (1.0 / odd_draw)
+            return round(1.0 / implied_p, 2)
+        return 1.20
+    elif "Menos de 3.5 Goles" in bet_type:
+        return round(1.0 / (p_under_3_5 * 1.05), 2)
+    elif "Más de 1.5 Goles" in bet_type:
+        return round(1.0 / (p_over_1_5 * 1.05), 2)
+    elif "Ambos marcan (NO)" in bet_type:
+        return round(1.0 / (p_both_score_no * 1.05), 2)
+    return 1.50
+
 # Mostrar pantalla de carga interactiva
 with st.spinner("🧠 Cargando assets pre-entrenados del modelo de IA... Esto será instantáneo."):
     try:
@@ -790,11 +861,25 @@ if model_ready:
             ia_odd_win_b = 1.0 / p_win_b if p_win_b > 0 else 99.0
             
             matchup_odds = live_odds.get((team_a, team_b))
-            if matchup_odds:
-                st.markdown("##### 🎲 Comparación con Casas de Apuestas (En Vivo)")
+            is_mock_odds = False
+            if not matchup_odds:
+                is_mock_odds = True
+                matchup_odds = generate_stable_mock_odds(team_a, team_b, p_draw, p_win_a, p_win_b)
                 
-                # Buscar Bet365 o usar la primera disponible
-                bm_choice = 'Bet365' if 'Bet365' in matchup_odds else list(matchup_odds.keys())[0]
+            if matchup_odds:
+                st.markdown("##### 🎲 Comparación con Casas de Apuestas")
+                if is_mock_odds:
+                    st.caption("🟠 *Mostrando cuotas estimadas por IA (Simulación con Margen ~5%). Introduce tu API Key en la barra lateral para cuotas reales en vivo.*")
+                else:
+                    st.caption("🟢 *Mostrando cuotas en vivo desde The Odds API.*")
+                
+                # Selector interactivo de casa de apuestas
+                bm_choice = st.selectbox(
+                    "Selecciona la Casa de Apuestas:",
+                    options=list(matchup_odds.keys()),
+                    index=0,
+                    key=f"bm_choice_{team_a}_{team_b}"
+                )
                 bm_odds = matchup_odds[bm_choice]
                 
                 val_win_a = "🔥 VALOR (+EV)" if bm_odds['home'] > ia_odd_win_a else "Sin Valor"
@@ -1089,14 +1174,49 @@ if model_ready:
                             break
                     
                     if not played:
+                        # Obtener predicciones completas para goles y ganador
+                        probs, _ = get_match_prediction(ta, tb, selected_model_name)
+                        p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
+                        
                         bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
+                        
+                        # Obtener lambdas para goles
+                        lc = model_vars['lambda_cache'].get((ta, tb))
+                        lambda_total = 2.7
+                        lambda_a_val = 1.35
+                        lambda_b_val = 1.35
+                        if lc:
+                            lambda_a_val = lc['lambda_a']
+                            lambda_b_val = lc['lambda_b']
+                            lambda_total = lambda_a_val + lambda_b_val
+                            
+                        p_under_1_5 = math.exp(-lambda_total) * (1 + lambda_total)
+                        p_over_1_5 = 1 - p_under_1_5
+                        p_under_3_5 = math.exp(-lambda_total) * (1 + lambda_total + (lambda_total**2)/2 + (lambda_total**3)/6)
+                        p_both_score = (1 - math.exp(-lambda_a_val)) * (1 - math.exp(-lambda_b_val))
+                        p_both_score_no = 1 - p_both_score
+                        
+                        # Obtener cuotas reales o simuladas
+                        matchup_odds = live_odds.get((ta, tb))
+                        if not matchup_odds:
+                            matchup_odds = generate_stable_mock_odds(ta, tb, p_draw, p_win_a, p_win_b)
+                        
+                        # Elegir la cuota real/simulada para una casa de apuestas por defecto (Bet365)
+                        bm_odds = matchup_odds.get('Bet365', list(matchup_odds.values())[0] if matchup_odds else {'home': 1.8, 'draw': 3.2, 'away': 2.0})
+                        
+                        real_odd = get_market_odd(bet_type, is_a_fav, bm_odds, p_under_3_5, p_over_1_5, p_both_score_no)
+                        ia_fair_odd = round(1.0 / prob, 2) if prob > 0 else 99.0
+                        
                         pending_bets.append({
                             'group': group_name,
                             'match': f"{ta} vs {tb}",
                             'favorite': fav,
                             'underdog': und,
                             'bet_type': bet_type,
-                            'prob': prob
+                            'prob': prob,
+                            'fair_odd': ia_fair_odd,
+                            'real_odd': real_odd,
+                            'value': "🔥 VALOR (+EV)" if real_odd > ia_fair_odd else "Normal"
                         })
                         
         pending_bets_sorted = sorted(pending_bets, key=lambda x: x['prob'], reverse=True)
@@ -1109,16 +1229,22 @@ if model_ready:
             # 1. Combinada Segura
             segura_items = pending_bets_sorted[:3]
             prob_segura = 1.0
+            cuota_real_segura = 1.0
             for b in segura_items:
                 prob_segura *= b['prob']
-            cuota_segura = 1.0 / prob_segura if prob_segura > 0 else 1.0
+                cuota_real_segura *= b['real_odd']
+            cuota_segura_justa = 1.0 / prob_segura if prob_segura > 0 else 1.0
+            ev_segura = ((cuota_real_segura / cuota_segura_justa) - 1.0) * 100.0
             
             # 2. Combinada Moderada
             moderada_items = pending_bets_sorted[3:6] if len(pending_bets_sorted) >= 6 else pending_bets_sorted[-3:]
             prob_moderada = 1.0
+            cuota_real_moderada = 1.0
             for b in moderada_items:
                 prob_moderada *= b['prob']
-            cuota_moderada = 1.0 / prob_moderada if prob_moderada > 0 else 1.0
+                cuota_real_moderada *= b['real_odd']
+            cuota_moderada_justa = 1.0 / prob_moderada if prob_moderada > 0 else 1.0
+            ev_moderada = ((cuota_real_moderada / cuota_moderada_justa) - 1.0) * 100.0
             
             col_parlay_1, col_parlay_2 = st.columns(2)
             
@@ -1130,11 +1256,12 @@ if model_ready:
                             <span style='background-color: #10B981; color: white; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>RIESGO BAJO</span>
                             <span style='font-size: 0.9rem; color: #94A3B8;'>Prob: <b>{prob_segura*100:.1f}%</b></span>
                         </div>
-                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟢 La Combinada Segura (Cuota @{cuota_segura:.2f})</h4>
+                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟢 La Combinada Segura (Cuota @{cuota_real_segura:.2f})</h4>
                         <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.6;'>
-                            • <b>{segura_items[0]['match']}</b>: {segura_items[0]['bet_type']} ({segura_items[0]['prob']*100:.1f}%)<br>
-                            • <b>{segura_items[1]['match']}</b>: {segura_items[1]['bet_type']} ({segura_items[1]['prob']*100:.1f}%)<br>
-                            • <b>{segura_items[2]['match']}</b>: {segura_items[2]['bet_type']} ({segura_items[2]['prob']*100:.1f}%)
+                            • <b>{segura_items[0]['match']}</b>: {segura_items[0]['bet_type']} (@{segura_items[0]['real_odd']:.2f})<br>
+                            • <b>{segura_items[1]['match']}</b>: {segura_items[1]['bet_type']} (@{segura_items[1]['real_odd']:.2f})<br>
+                            • <b>{segura_items[2]['match']}</b>: {segura_items[2]['bet_type']} (@{segura_items[2]['real_odd']:.2f})<br>
+                            <span style='color: #94A3B8; font-size: 0.8rem;'>Cuota Justa IA: @{cuota_segura_justa:.2f} | Valor EV: <b style='color: #10B981;'>{ev_segura:+.1f}%</b></span>
                         </div>
                     </div>
                 </div>
@@ -1148,11 +1275,12 @@ if model_ready:
                             <span style='background-color: #EAB308; color: #0F172A; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>RIESGO MEDIO</span>
                             <span style='font-size: 0.9rem; color: #94A3B8;'>Prob: <b>{prob_moderada*100:.1f}%</b></span>
                         </div>
-                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟡 La Combinada de Valor (Cuota @{cuota_moderada:.2f})</h4>
+                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟡 La Combinada de Valor (Cuota @{cuota_real_moderada:.2f})</h4>
                         <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.6;'>
-                            • <b>{moderada_items[0]['match']}</b>: {moderada_items[0]['bet_type']} ({moderada_items[0]['prob']*100:.1f}%)<br>
-                            • <b>{moderada_items[1]['match']}</b>: {moderada_items[1]['bet_type']} ({moderada_items[1]['prob']*100:.1f}%)<br>
-                            • <b>{moderada_items[2]['match']}</b>: {moderada_items[2]['bet_type']} ({moderada_items[2]['prob']*100:.1f}%)
+                            • <b>{moderada_items[0]['match']}</b>: {moderada_items[0]['bet_type']} (@{moderada_items[0]['real_odd']:.2f})<br>
+                            • <b>{moderada_items[1]['match']}</b>: {moderada_items[1]['bet_type']} (@{moderada_items[1]['real_odd']:.2f})<br>
+                            • <b>{moderada_items[2]['match']}</b>: {moderada_items[2]['bet_type']} (@{moderada_items[2]['real_odd']:.2f})<br>
+                            <span style='color: #94A3B8; font-size: 0.8rem;'>Cuota Justa IA: @{cuota_moderada_justa:.2f} | Valor EV: <b style='color: #EAB308;'>{ev_moderada:+.1f}%</b></span>
                         </div>
                     </div>
                 </div>
@@ -1184,7 +1312,7 @@ if model_ready:
                             <div style='font-size: 1rem; font-weight: 700; color: #F8FAFC; margin: 5px 0;'>{bet['match']}</div>
                             <div style='font-size: 0.85rem; color: #38BDF8;'>👉 <b>{bet['bet_type']}</b></div>
                             <div style='font-size: 1.4rem; font-weight: 900; color: #10B981; margin-top: 5px;'>{bet['prob']*100:.1f}%</div>
-                            <div style='font-size: 0.7rem; color: #64748B;'>Probabilidad de éxito</div>
+                            <div style='font-size: 0.75rem; color: #94A3B8;'>Cuota Real: <b>@{bet['real_odd']:.2f}</b> ({bet['value']})</div>
                         </div>
                         """, unsafe_allow_html=True)
                 
@@ -1194,10 +1322,13 @@ if model_ready:
                     {
                         'Grupo': f"Grupo {b['group']}",
                         'Partido': b['match'],
-                        'Favorito': b['favorite'],
                         'Apuesta Recomendada': b['bet_type'],
                         'Confianza de la IA': f"{b['prob']*100:.1f}%",
-                        'Evaluación': "🆕 NEW (Predicción Pura)"
+                        'Cuota Justa': f"@{b['fair_odd']:.2f}",
+                        'Cuota Real (Bet365)': f"@{b['real_odd']:.2f}",
+                        'Valoración': b['value'],
+                        'Evaluación': b['value'],
+                        'Tipo': "🆕 NEW (Predicción Pura)"
                     } for b in pending_bets_sorted
                 ])
                 st.dataframe(df_pending, use_container_width=True, hide_index=True)
