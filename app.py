@@ -214,6 +214,47 @@ def get_team_color(team, default='#1e293b'):
     """Retorna el color primario de una selección nacional."""
     return TEAM_COLORS.get(team, default)
 
+# Cargar resultados en tiempo real con caching
+@st.cache_data(ttl=3600)  # Caché por 1 hora
+def fetch_online_results():
+    """Descarga los resultados actualizados de la Copa del Mundo 2026 desde GitHub."""
+    url = "https://raw.githubusercontent.com/martj42/international_results/master/results.csv"
+    try:
+        df = pd.read_csv(url)
+        df['date'] = pd.to_datetime(df['date'])
+        # Filtrar partidos de la Copa del Mundo 2026
+        df_wc = df[(df['tournament'] == 'FIFA World Cup') & (df['date'] >= pd.Timestamp('2026-06-11'))]
+        
+        online_results = []
+        for _, row in df_wc.iterrows():
+            home = pred.normalize_name(row['home_team'])
+            away = pred.normalize_name(row['away_team'])
+            
+            # Buscar el grupo del partido
+            group = None
+            for g, teams in pred.WC2026_GROUPS.items():
+                if home in [pred.normalize_name(t) for t in teams]:
+                    group = g
+                    break
+                    
+            online_results.append({
+                'date': row['date'].strftime('%Y-%m-%d'),
+                'home': home,
+                'away': away,
+                'home_score': int(row['home_score']),
+                'away_score': int(row['away_score']),
+                'group': group
+            })
+        
+        if len(online_results) > 0:
+            return online_results
+    except Exception as e:
+        pass
+    
+    return pred.WC2026_RESULTS
+
+wc2026_results = fetch_online_results()
+
 # =============================================================================
 # CÁRGA DE DATOS Y MODELO (CON CACHÉ)
 # =============================================================================
@@ -268,7 +309,7 @@ def compute_wc2026_momentum(team):
     tn = pred.normalize_name(team)
     matches_played = 0
     points = 0
-    for r in pred.WC2026_RESULTS:
+    for r in wc2026_results:
         home = pred.normalize_name(r['home'])
         away = pred.normalize_name(r['away'])
         if home == tn:
@@ -309,6 +350,68 @@ def get_match_prediction(team_a, team_b, active_model_name):
     features = fc.get((ta, tb), {})
     
     return probs, features
+
+def get_safest_bet(team_a, team_b, active_model_name):
+    probs, _ = get_match_prediction(team_a, team_b, active_model_name)
+    p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
+    
+    ta = pred.normalize_name(team_a)
+    tb = pred.normalize_name(team_b)
+    
+    if p_win_a > p_win_b:
+        fav = ta
+        und = tb
+        fav_prob = p_win_a
+        is_a_fav = True
+    else:
+        fav = tb
+        und = ta
+        fav_prob = p_win_b
+        is_a_fav = False
+        
+    lc = model_vars['lambda_cache'].get((ta, tb))
+    lambda_total = 2.7
+    lambda_a_val = 1.35
+    lambda_b_val = 1.35
+    if lc:
+        lambda_a_val = lc['lambda_a']
+        lambda_b_val = lc['lambda_b']
+        lambda_total = lambda_a_val + lambda_b_val
+        
+    p_under_1_5 = math.exp(-lambda_total) * (1 + lambda_total)
+    p_over_1_5 = 1 - p_under_1_5
+    p_under_3_5 = math.exp(-lambda_total) * (1 + lambda_total + (lambda_total**2)/2 + (lambda_total**3)/6)
+    p_both_score = (1 - math.exp(-lambda_a_val)) * (1 - math.exp(-lambda_b_val))
+    p_both_score_no = 1 - p_both_score
+    
+    markets = [
+        ('Doble Oportunidad (Gana/Empata Favorito)', fav_prob + p_draw),
+        ('Menos de 3.5 Goles', p_under_3_5),
+        ('Más de 1.5 Goles', p_over_1_5),
+        ('Gana Favorito', fav_prob),
+        ('Ambos marcan (NO)', p_both_score_no)
+    ]
+    
+    safest_market, safest_prob = max(markets, key=lambda x: x[1])
+    return safest_market, safest_prob, fav, und, is_a_fav
+
+def check_bet_won(bet_type, is_a_fav, hs_a, hs_b):
+    if is_a_fav:
+        hs_fav, hs_und = hs_a, hs_b
+    else:
+        hs_fav, hs_und = hs_b, hs_a
+        
+    if "Doble Oportunidad" in bet_type:
+        return hs_fav >= hs_und
+    elif "Menos de 3.5" in bet_type:
+        return (hs_fav + hs_und) <= 3
+    elif "Más de 1.5" in bet_type:
+        return (hs_fav + hs_und) >= 2
+    elif "Gana Favorito" in bet_type:
+        return hs_fav > hs_und
+    elif "Ambos marcan (NO)" in bet_type:
+        return hs_fav == 0 or hs_und == 0
+    return False
 
 def calculate_expected_score(team_a, team_b):
     """
@@ -374,7 +477,7 @@ if model_ready:
                 
                 # Buscar si ya se ha jugado
                 played_info = None
-                for r in pred.WC2026_RESULTS:
+                for r in wc2026_results:
                     r_home = pred.normalize_name(r['home'])
                     r_away = pred.normalize_name(r['away'])
                     if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
@@ -813,125 +916,149 @@ if model_ready:
     with tab_betting:
         st.markdown("### 🎯 Consejos y Pronósticos de Apuestas de Alta Probabilidad")
         st.write("Basado en 5,000 simulaciones completas de Monte Carlo del Mundial 2026 y la calibración de goles de la distribución de Poisson.")
+        st.markdown("💡 *Los resultados reales de los partidos se obtienen online y en tiempo real desde GitHub para auditar y verificar el éxito de los pronósticos de la IA.*")
         
-        # 1. Top Clasificados a Dieciseisavos (Knockout)
-        st.markdown("#### 🛡️ Selecciones con Mayor Seguridad de Clasificar a Dieciseisavos")
-        ko_probs = {}
-        for team in model_vars['qualified']:
-            count = model_vars['stage_counts']['round_of_32'].get(team, 0)
-            ko_probs[team] = count / model_vars['n_simulations']
-        ko_probs_sorted = sorted(ko_probs.items(), key=lambda x: x[1], reverse=True)[:8]
+        # Calcular estadísticas globales de acierto para partidos jugados
+        total_bets = 0
+        won_bets = 0
+        played_bets_data = []
         
-        col_ko_1, col_ko_2 = st.columns(2)
-        for idx, (team, prob) in enumerate(ko_probs_sorted):
-            target_col = col_ko_1 if idx % 2 == 0 else col_ko_2
-            with target_col:
-                st.markdown(f"""
-                <div style='background-color: #1E293B; border-radius: 10px; padding: 12px 20px; border-left: 5px solid #10B981; margin-bottom: 10px;'>
-                    <div style='display: flex; justify-content: space-between; align-items: center;'>
-                        <span style='font-size: 1.1rem; font-weight: 700; color: #F8FAFC;'>{team}</span>
-                        <span style='font-size: 1.2rem; font-weight: 900; color: #10B981;'>{prob*100:.1f}%</span>
-                    </div>
-                    <div style='font-size: 0.8rem; color: #94A3B8;'>Probabilidad de avanzar de la Fase de Grupos</div>
-                </div>
-                """, unsafe_allow_html=True)
+        for r in wc2026_results:
+            ta = pred.normalize_name(r['home'])
+            tb = pred.normalize_name(r['away'])
+            hs_a = r['home_score']
+            hs_b = r['away_score']
+            
+            # Obtener apuesta recomendada
+            bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
+            is_won = check_bet_won(bet_type, is_a_fav, hs_a, hs_b)
+            
+            total_bets += 1
+            if is_won:
+                won_bets += 1
                 
-        # 2. Top 5 Partidos Oficiales Pendientes Más Seguros
-        st.markdown("#### ⚽ Top 5 Pronósticos de Partidos Oficiales Más Seguros (Fase de Grupos)")
+            played_bets_data.append({
+                'Grupo': f"Grupo {r.get('group', 'N/A')}",
+                'Partido': f"{ta} vs {tb}",
+                'Resultado Real': f"{hs_a} - {hs_b}",
+                'Apuesta Realizada': f"{bet_type}",
+                'Prob. Estimada': f"{prob*100:.1f}%",
+                'Estado': "✅ ACERTADA" if is_won else "❌ FALLADA"
+            })
+            
+        accuracy = (won_bets / total_bets * 100) if total_bets > 0 else 0.0
         
-        pending_bets = []
-        for group_name, teams in pred.WC2026_GROUPS.items():
-            for i in range(len(teams)):
-                for j in range(i + 1, len(teams)):
-                    ta = pred.normalize_name(teams[i])
-                    tb = pred.normalize_name(teams[j])
-                    
-                    # Verificar si ya se jugó
-                    played = False
-                    for r in pred.WC2026_RESULTS:
-                        r_home = pred.normalize_name(r['home'])
-                        r_away = pred.normalize_name(r['away'])
-                        if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
-                            played = True
-                            break
-                    
-                    if not played:
-                        # Obtener probabilidades del modelo seleccionado
-                        probs, _ = get_match_prediction(ta, tb, selected_model_name)
-                        p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
-                        
-                        if p_win_a > p_win_b:
-                            fav = ta
-                            und = tb
-                            fav_prob = p_win_a
-                        else:
-                            fav = tb
-                            und = ta
-                            fav_prob = p_win_b
-                            
-                        # Obtener lambdas
-                        lc = model_vars['lambda_cache'].get((ta, tb))
-                        lambda_total = 2.7
-                        lambda_a_val = 1.35
-                        lambda_b_val = 1.35
-                        if lc:
-                            lambda_a_val = lc['lambda_a']
-                            lambda_b_val = lc['lambda_b']
-                            lambda_total = lambda_a_val + lambda_b_val
-                            
-                        p_under_1_5 = math.exp(-lambda_total) * (1 + lambda_total)
-                        p_over_1_5 = 1 - p_under_1_5
-                        
-                        p_under_3_5 = math.exp(-lambda_total) * (1 + lambda_total + (lambda_total**2)/2 + (lambda_total**3)/6)
-                        
-                        p_both_score = (1 - math.exp(-lambda_a_val)) * (1 - math.exp(-lambda_b_val))
-                        p_both_score_no = 1 - p_both_score
-                        
-                        pending_bets.append({
-                            'match': f"{ta} vs {tb}",
-                            'group': group_name,
-                            'favorite': fav,
-                            'underdog': und,
-                            'win_prob': fav_prob,
-                            'double_chance_prob': fav_prob + p_draw,
-                            'over_1_5': p_over_1_5,
-                            'under_3_5': p_under_3_5,
-                            'both_score_no': p_both_score_no
-                        })
-                        
-        pending_bets_sorted = sorted(pending_bets, key=lambda x: x['win_prob'], reverse=True)[:5]
+        # Renderizar Tarjetas de Estadísticas de Acierto
+        col_acc_1, col_acc_2, col_acc_3 = st.columns(3)
+        with col_acc_1:
+            st.markdown(f"""
+            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center;'>
+                <div style='font-size: 0.85rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;'>Partidos Evaluados (API)</div>
+                <div style='font-size: 2.2rem; font-weight: 900; color: #38BDF8;'>{total_bets}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_acc_2:
+            st.markdown(f"""
+            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center;'>
+                <div style='font-size: 0.85rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;'>Apuestas Acertadas</div>
+                <div style='font-size: 2.2rem; font-weight: 900; color: #10B981;'>{won_bets}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_acc_3:
+            st.markdown(f"""
+            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center;'>
+                <div style='font-size: 0.85rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;'>Tasa de Acierto Global</div>
+                <div style='font-size: 2.2rem; font-weight: 900; color: #10B981;'>{accuracy:.1f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown("---")
         
-        for idx, bet in enumerate(pending_bets_sorted):
-            with st.container():
-                st.markdown(f"""
-                <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; margin-bottom: 15px;'>
-                    <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;'>
-                        <span style='background-color: #38BDF8; color: #0F172A; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>
-                            GRUPO {bet['group']}
-                        </span>
-                        <span style='font-size: 0.95rem; color: #94A3B8; font-weight: 600;'>{bet['match']}</span>
-                    </div>
-                    <div style='display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; text-align: center;'>
-                        <div style='background-color: #0F172A; padding: 10px; border-radius: 8px; border: 1px solid #1E293B;'>
-                            <div style='font-size: 0.8rem; color: #64748B; text-transform: uppercase; font-weight: 700;'>Gana Favorito ({bet['favorite']})</div>
-                            <div style='font-size: 1.4rem; font-weight: 800; color: #38BDF8;'>{bet['win_prob']*100:.1f}%</div>
+        # Sub-pestañas para segmentar apuestas
+        sub_tab_pending, sub_tab_history = st.tabs([
+            "🔮 Apuestas para Partidos Restantes",
+            "📜 Historial y Verificación de Resultados"
+        ])
+        
+        with sub_tab_pending:
+            st.markdown("#### 🔮 Pronósticos para los Próximos Partidos del Mundial 2026")
+            st.write("A continuación se listan las apuestas recomendadas (las de mayor probabilidad) para cada uno de los partidos restantes de la fase de grupos.")
+            
+            # Obtener pendientes
+            pending_bets = []
+            for group_name, teams in pred.WC2026_GROUPS.items():
+                for i in range(len(teams)):
+                    for j in range(i + 1, len(teams)):
+                        ta = pred.normalize_name(teams[i])
+                        tb = pred.normalize_name(teams[j])
+                        
+                        # Verificar si ya se jugó
+                        played = False
+                        for r in wc2026_results:
+                            r_home = pred.normalize_name(r['home'])
+                            r_away = pred.normalize_name(r['away'])
+                            if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
+                                played = True
+                                break
+                        
+                        if not played:
+                            bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
+                            pending_bets.append({
+                                'group': group_name,
+                                'match': f"{ta} vs {tb}",
+                                'favorite': fav,
+                                'underdog': und,
+                                'bet_type': bet_type,
+                                'prob': prob
+                            })
+                            
+            pending_bets_sorted = sorted(pending_bets, key=lambda x: x['prob'], reverse=True)
+            
+            if len(pending_bets_sorted) > 0:
+                # Mostrar top 3 destacadas como tarjetas visuales
+                st.markdown("##### ⭐ Top 3 Apuestas más Seguras (Sólidas)")
+                col_top_1, col_top_2, col_top_3 = st.columns(3)
+                top_cols = [col_top_1, col_top_2, col_top_3]
+                
+                for idx, bet in enumerate(pending_bets_sorted[:3]):
+                    with top_cols[idx]:
+                        st.markdown(f"""
+                        <div style='background-color: #1E293B; border-radius: 12px; padding: 15px; border-top: 5px solid #38BDF8; margin-bottom: 15px;'>
+                            <div style='font-size: 0.75rem; color: #94A3B8; text-transform: uppercase; font-weight: 700;'>Grupo {bet['group']}</div>
+                            <div style='font-size: 1rem; font-weight: 700; color: #F8FAFC; margin: 5px 0;'>{bet['match']}</div>
+                            <div style='font-size: 0.85rem; color: #38BDF8;'>👉 <b>{bet['bet_type']}</b></div>
+                            <div style='font-size: 1.4rem; font-weight: 900; color: #10B981; margin-top: 5px;'>{bet['prob']*100:.1f}%</div>
+                            <div style='font-size: 0.7rem; color: #64748B;'>Probabilidad de éxito</div>
                         </div>
-                        <div style='background-color: #0F172A; padding: 10px; border-radius: 8px; border: 1px solid #1E293B;'>
-                            <div style='font-size: 0.8rem; color: #64748B; text-transform: uppercase; font-weight: 700;'>Doble Oportunidad (1X o X2)</div>
-                            <div style='font-size: 1.4rem; font-weight: 800; color: #10B981;'>{bet['double_chance_prob']*100:.1f}%</div>
-                        </div>
-                        <div style='background-color: #0F172A; padding: 10px; border-radius: 8px; border: 1px solid #1E293B;'>
-                            <div style='font-size: 0.8rem; color: #64748B; text-transform: uppercase; font-weight: 700;'>Menos de 3.5 Goles</div>
-                            <div style='font-size: 1.4rem; font-weight: 800; color: #F43F5E;'>{bet['under_3_5']*100:.1f}%</div>
-                        </div>
-                    </div>
-                    <div style='margin-top: 10px; display: flex; gap: 20px; font-size: 0.85rem; color: #94A3B8; justify-content: center;'>
-                        <span>📊 Más de 1.5 goles en el partido: <b>{bet['over_1_5']*100:.1f}%</b></span>
-                        <span>•</span>
-                        <span>🚫 Ambos equipos marcan (NO): <b>{bet['both_score_no']*100:.1f}%</b></span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                        """, unsafe_allow_html=True)
+                
+                # Mostrar lista completa en tabla interactiva
+                st.markdown("##### 📋 Listado Completo de Partidos Restantes")
+                df_pending = pd.DataFrame([
+                    {
+                        'Grupo': f"Grupo {b['group']}",
+                        'Partido': b['match'],
+                        'Favorito': b['favorite'],
+                        'Apuesta Recomendada': b['bet_type'],
+                        'Confianza de la IA': f"{b['prob']*100:.1f}%"
+                    } for b in pending_bets_sorted
+                ])
+                st.dataframe(df_pending, use_container_width=True, hide_index=True)
+            else:
+                st.info("🎉 ¡Fase de grupos completada! Todos los partidos ya han sido jugados.")
+                
+        with sub_tab_history:
+            st.markdown("#### 📜 Historial de Apuestas y Resultados Obtenidos")
+            st.write("Verificación detallada de los pronósticos realizados en los partidos ya completados.")
+            
+            if len(played_bets_data) > 0:
+                df_played = pd.DataFrame(played_bets_data)
+                st.dataframe(df_played, use_container_width=True, hide_index=True)
+            else:
+                st.info("⏳ Aún no se han registrado partidos jugados en la Copa del Mundo 2026.")
+                
+else:
+    st.warning("⚠️ El modelo de Machine Learning no ha terminado de entrenarse o no está disponible. Inicializa el script primero.")
                 
 else:
     st.warning("⚠️ El modelo de Machine Learning no ha terminado de entrenarse o no está disponible. Inicializa el script primero.")
