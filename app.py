@@ -14,6 +14,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
+import requests
 
 # Asegurar encoding UTF-8 en Windows
 if sys.platform == 'win32':
@@ -292,6 +293,60 @@ def load_pretrained_assets():
     }
     return model_data
 
+@st.cache_data(ttl=600)  # Caché por 10 minutos
+def fetch_live_odds(api_key):
+    """Obtiene cuotas reales de casas de apuestas usando The Odds API."""
+    if not api_key:
+        return {}
+    
+    url = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup/odds/"
+    params = {
+        'apiKey': api_key,
+        'regions': 'eu',  # Europa (Bet365, Codere, Bwin, etc.)
+        'markets': 'h2h',
+        'oddsFormat': 'decimal'
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            odds_cache = {}
+            for match in data:
+                home = pred.normalize_name(match['home_team'])
+                away = pred.normalize_name(match['away_team'])
+                
+                match_odds = {}
+                for bm in match.get('bookmakers', []):
+                    bm_name = bm['title']
+                    for market in bm.get('markets', []):
+                        if market['key'] == 'h2h':
+                            odds = {}
+                            for outcome in market['outcomes']:
+                                team = pred.normalize_name(outcome['name'])
+                                odds[team] = outcome['price']
+                            
+                            # Guardar cuotas de local, empate y visitante
+                            match_odds[bm_name] = {
+                                'home': odds.get(home, 1.0),
+                                'draw': odds.get('Draw', 1.0),
+                                'away': odds.get(away, 1.0)
+                            }
+                if len(match_odds) > 0:
+                    odds_cache[(home, away)] = match_odds
+                    # Guardar también en sentido inverso
+                    odds_cache[(away, home)] = {
+                        bm: {
+                            'home': odds_cache[(home, away)][bm]['away'],
+                            'draw': odds_cache[(home, away)][bm]['draw'],
+                            'away': odds_cache[(home, away)][bm]['home']
+                        } for bm in match_odds
+                    }
+            return odds_cache
+    except Exception as e:
+        pass
+    return {}
+
 # Mostrar pantalla de carga interactiva
 with st.spinner("🧠 Cargando assets pre-entrenados del modelo de IA... Esto será instantáneo."):
     try:
@@ -538,6 +593,18 @@ if model_ready:
     st.sidebar.markdown(f"• **F1-Score Macro:** `{metrics['f1_mean']:.3f}`")
     st.sidebar.markdown(f"• **Log Loss:** `{metrics['log_loss_mean']:.3f}`")
     st.sidebar.markdown(f"• **Partidos de Entrenamiento:** `3,760`")
+    
+    # Configuración de Cuotas en Vivo (Opcional)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"**🔑 API de Cuotas en Vivo (Opcional):**")
+    odds_api_key = st.sidebar.text_input(
+        "API Key (the-odds-api.com):",
+        type="password",
+        help="Introduce tu API Key gratuita de The Odds API para ver cuotas reales de Bet365, Codere, etc. en tiempo real."
+    )
+    
+    # Cargar cuotas en vivo
+    live_odds = fetch_live_odds(odds_api_key)
 
     # =============================================================================
     # PESTAÑAS PRINCIPALES DEL DASHBOARD
@@ -716,6 +783,35 @@ if model_ready:
                 resumen_txt = f"🔥 **{fav} es claro favorito**. Las features recopiladas (Elo, Ranking yOdds) le otorgan una sólida probabilidad de victoria del **{max_prob*100:.1f}%**."
                 
             st.info(resumen_txt)
+            
+            # Comparación con cuotas reales en vivo si hay API Key
+            ia_odd_win_a = 1.0 / p_win_a if p_win_a > 0 else 99.0
+            ia_odd_draw = 1.0 / p_draw if p_draw > 0 else 99.0
+            ia_odd_win_b = 1.0 / p_win_b if p_win_b > 0 else 99.0
+            
+            matchup_odds = live_odds.get((team_a, team_b))
+            if matchup_odds:
+                st.markdown("##### 🎲 Comparación con Casas de Apuestas (En Vivo)")
+                
+                # Buscar Bet365 o usar la primera disponible
+                bm_choice = 'Bet365' if 'Bet365' in matchup_odds else list(matchup_odds.keys())[0]
+                bm_odds = matchup_odds[bm_choice]
+                
+                val_win_a = "🔥 VALOR (+EV)" if bm_odds['home'] > ia_odd_win_a else "Sin Valor"
+                val_draw = "🔥 VALOR (+EV)" if bm_odds['draw'] > ia_odd_draw else "Sin Valor"
+                val_win_b = "🔥 VALOR (+EV)" if bm_odds['away'] > ia_odd_win_b else "Sin Valor"
+                
+                comp_odds_data = {
+                    'Resultado': [f"Gana {team_a}", "Empate", f"Gana {team_b}"],
+                    'Probabilidad IA': [f"{p_win_a*100:.1f}%", f"{p_draw*100:.1f}%", f"{p_win_b*100:.1f}%"],
+                    'Cuota Justa IA': [f"@{ia_odd_win_a:.2f}", f"@{ia_odd_draw:.2f}", f"@{ia_odd_win_b:.2f}"],
+                    f'Cuota Real ({bm_choice})': [f"@{bm_odds['home']:.2f}", f"@{bm_odds['draw']:.2f}", f"@{bm_odds['away']:.2f}"],
+                    'Valoración': [val_win_a, val_draw, val_win_b]
+                }
+                
+                df_comp_odds = pd.DataFrame(comp_odds_data)
+                st.dataframe(df_comp_odds.set_index('Resultado'), use_container_width=True)
+                st.info(f"💡 **Valor (+EV):** Ocurre cuando la cuota real de la casa de apuestas es mayor que la cuota justa estimada por la IA, representando una oportunidad matemática rentable a largo plazo.")
 
         with col_right:
             st.markdown("### ⚽ Marcador Esperado (Poisson)")
