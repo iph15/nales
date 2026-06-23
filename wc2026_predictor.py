@@ -5,7 +5,7 @@
 ║                                                                      ║
 ║  Pipeline completo de ML para predecir el ganador del Mundial 2026   ║
 ║  • Scraping de datos históricos (49,000+ partidos)                   ║
-║  • Rankings FIFA, Elo ratings, odds de apuestas                      ║
+║  • Rankings FIFA, Elo ratings                                        ║
 ║  • Feature engineering con decaimiento temporal                      ║
 ║  • Selección de features (MI, correlación, importancia)              ║
 ║  • Comparación de 5 modelos ML con cross-validation                  ║
@@ -145,23 +145,7 @@ FIFA_RANKINGS = {
     'Curacao': {'rank': 50, 'points': 1400.00},
 }
 
-# --- Odds de apuestas (probabilidades implícitas, junio 2026) ---
-# Convertidas de odds americanas a probabilidades implícitas
-BETTING_ODDS = {
-    'France': 0.20, 'Spain': 0.155, 'England': 0.145, 'Argentina': 0.12,
-    'Portugal': 0.095, 'Brazil': 0.083, 'Germany': 0.071, 'Netherlands': 0.05,
-    'Belgium': 0.04, 'Colombia': 0.03, 'Croatia': 0.025, 'Uruguay': 0.022,
-    'Mexico': 0.019, 'United States': 0.018, 'Japan': 0.015, 'Morocco': 0.014,
-    'South Korea': 0.010, 'Switzerland': 0.009, 'Sweden': 0.008, 'Senegal': 0.007,
-    'Ecuador': 0.006, 'Australia': 0.005, 'Turkey': 0.005, 'Austria': 0.004,
-    'Iran': 0.004, 'Norway': 0.004, 'Egypt': 0.003, 'Algeria': 0.003,
-    'Scotland': 0.003, 'Tunisia': 0.002, 'Paraguay': 0.002, 'Ivory Coast': 0.002,
-    'Czech Republic': 0.002, 'Saudi Arabia': 0.002, 'Ghana': 0.002,
-    'Canada': 0.002, 'Panama': 0.001, 'Iraq': 0.001, 'Jordan': 0.001,
-    'Qatar': 0.001, 'Uzbekistan': 0.001, 'Bosnia and Herzegovina': 0.001,
-    'South Africa': 0.001, 'DR Congo': 0.001, 'New Zealand': 0.0005,
-    'Cape Verde': 0.0005, 'Haiti': 0.0003, 'Curacao': 0.0002,
-}
+
 
 # --- Valor de mercado de las plantillas (Millones de Euros, junio 2026) ---
 SQUAD_VALUES = {
@@ -198,7 +182,6 @@ CONFEDERATIONS = {
 
 # --- Resultados ya jugados del Mundial 2026 ---
 WC2026_RESULTS = [
-    # Jornada 1
     {'date': '2026-06-11', 'home': 'Mexico', 'away': 'South Africa', 'home_score': 2, 'away_score': 0, 'group': 'A'},
     {'date': '2026-06-11', 'home': 'South Korea', 'away': 'Czech Republic', 'home_score': 2, 'away_score': 1, 'group': 'A'},
     {'date': '2026-06-12', 'home': 'Canada', 'away': 'Bosnia and Herzegovina', 'home_score': 1, 'away_score': 1, 'group': 'B'},
@@ -216,15 +199,29 @@ WC2026_RESULTS = [
     {'date': '2026-06-15', 'home': 'Spain', 'away': 'Cape Verde', 'home_score': 0, 'away_score': 0, 'group': 'H'},
     {'date': '2026-06-15', 'home': 'Saudi Arabia', 'away': 'Uruguay', 'home_score': 1, 'away_score': 1, 'group': 'H'},
     {'date': '2026-06-16', 'home': 'France', 'away': 'Senegal', 'home_score': 3, 'away_score': 1, 'group': 'I'},
-    {'date': '2026-06-16', 'home': 'Norway', 'away': 'Iraq', 'home_score': 4, 'away_score': 1, 'group': 'I'},
+    {'date': '2026-06-16', 'home': 'Iraq', 'away': 'Norway', 'home_score': 1, 'away_score': 4, 'group': 'I'},
     {'date': '2026-06-16', 'home': 'Argentina', 'away': 'Algeria', 'home_score': 3, 'away_score': 0, 'group': 'J'},
+    {'date': '2026-06-16', 'home': 'Austria', 'away': 'Jordan', 'home_score': 3, 'away_score': 1, 'group': 'J'},
     {'date': '2026-06-17', 'home': 'Portugal', 'away': 'DR Congo', 'home_score': 1, 'away_score': 1, 'group': 'K'},
+    {'date': '2026-06-17', 'home': 'Uzbekistan', 'away': 'Colombia', 'home_score': 1, 'away_score': 3, 'group': 'K'},
     {'date': '2026-06-17', 'home': 'England', 'away': 'Croatia', 'home_score': 4, 'away_score': 2, 'group': 'L'},
-    # Jornada 2 (parcial)
+    {'date': '2026-06-17', 'home': 'Ghana', 'away': 'Panama', 'home_score': 1, 'away_score': 0, 'group': 'L'},
     {'date': '2026-06-18', 'home': 'Czech Republic', 'away': 'South Africa', 'home_score': 1, 'away_score': 1, 'group': 'A'},
+    {'date': '2026-06-18', 'home': 'Mexico', 'away': 'South Korea', 'home_score': 1, 'away_score': 0, 'group': 'A'},
     {'date': '2026-06-18', 'home': 'Switzerland', 'away': 'Bosnia and Herzegovina', 'home_score': 4, 'away_score': 1, 'group': 'B'},
     {'date': '2026-06-18', 'home': 'Canada', 'away': 'Qatar', 'home_score': 6, 'away_score': 0, 'group': 'B'},
+    {'date': '2026-06-19', 'home': 'Scotland', 'away': 'Morocco', 'home_score': 0, 'away_score': 1, 'group': 'C'},
+    {'date': '2026-06-19', 'home': 'Brazil', 'away': 'Haiti', 'home_score': 3, 'away_score': 0, 'group': 'C'},
     {'date': '2026-06-19', 'home': 'United States', 'away': 'Australia', 'home_score': 2, 'away_score': 0, 'group': 'D'},
+    {'date': '2026-06-19', 'home': 'Turkey', 'away': 'Paraguay', 'home_score': 0, 'away_score': 1, 'group': 'D'},
+    {'date': '2026-06-20', 'home': 'Germany', 'away': 'Ivory Coast', 'home_score': 2, 'away_score': 1, 'group': 'E'},
+    {'date': '2026-06-20', 'home': 'Ecuador', 'away': 'Curacao', 'home_score': 0, 'away_score': 0, 'group': 'E'},
+    {'date': '2026-06-20', 'home': 'Netherlands', 'away': 'Sweden', 'home_score': 5, 'away_score': 1, 'group': 'F'},
+    {'date': '2026-06-20', 'home': 'Tunisia', 'away': 'Japan', 'home_score': 0, 'away_score': 4, 'group': 'F'},
+    {'date': '2026-06-21', 'home': 'Belgium', 'away': 'Iran', 'home_score': 0, 'away_score': 0, 'group': 'G'},
+    {'date': '2026-06-21', 'home': 'New Zealand', 'away': 'Egypt', 'home_score': 1, 'away_score': 3, 'group': 'G'},
+    {'date': '2026-06-21', 'home': 'Spain', 'away': 'Saudi Arabia', 'home_score': 4, 'away_score': 0, 'group': 'H'},
+    {'date': '2026-06-21', 'home': 'Uruguay', 'away': 'Cape Verde', 'home_score': 2, 'away_score': 2, 'group': 'H'},
 ]
 
 # --- Mapeo de nombres alternativos ---
@@ -350,10 +347,23 @@ class EloSystem:
         self.home_advantage = home_advantage
         self.history = defaultdict(list)  # {team: [(date, rating), ...]}
     
-    def get_k_factor(self, tournament):
+    def get_k_factor(self, tournament, date=None):
         """Factor K variable según importancia del torneo."""
         tournament = str(tournament).lower()
+        is_current_wc = False
         if 'world cup' in tournament and 'qualif' not in tournament:
+            if date is not None:
+                # Comprobar si la fecha es de 2026 (posterior a '2026-06-11')
+                if isinstance(date, str) and date >= '2026-06-11':
+                    is_current_wc = True
+                elif hasattr(date, 'year') and date.year == 2026:
+                    is_current_wc = True
+                elif hasattr(date, 'to_pydatetime') and date.to_pydatetime().year == 2026:
+                    is_current_wc = True
+        
+        if is_current_wc:
+            return self.k_base * 5.0  # 150 (¡Muchísimo más peso!)
+        elif 'world cup' in tournament and 'qualif' not in tournament:
             return self.k_base * 2.0  # 60
         elif 'continental' in tournament or 'euro' in tournament or 'copa' in tournament:
             return self.k_base * 1.5  # 45
@@ -402,7 +412,7 @@ class EloSystem:
         sa = self.get_actual_score(home_score, away_score)
         sb = 1.0 - sa
         
-        k = self.get_k_factor(tournament)
+        k = self.get_k_factor(tournament, date)
         gdm = self.goal_diff_multiplier(home_score - away_score)
         
         self.ratings[home_team] = ra + k * gdm * (sa - ea)
@@ -535,6 +545,12 @@ def compute_team_features_from_history(history_list, reference_date, n_recent=10
             'recent_win_rate': 0.33,
             'recent_goals_scored': 1.0,
             'recent_goals_conceded': 1.0,
+            'recent_short_win_rate': 0.33,
+            'recent_short_goals_scored': 1.0,
+            'recent_short_goals_conceded': 1.0,
+            'recent_mid_win_rate': 0.33,
+            'recent_mid_goals_scored': 1.0,
+            'recent_mid_goals_conceded': 1.0,
             'official_win_rate': 0.33,
             'consistency': 0.5,
             'matches_played': 0,
@@ -584,6 +600,19 @@ def compute_team_features_from_history(history_list, reference_date, n_recent=10
         is_official = 'friendly' not in str(match['tournament']).lower()
         is_wc = 'world cup' in str(match['tournament']).lower() and 'qualif' not in str(match['tournament']).lower()
         
+        # Identificar si es el Mundial 2026 actual para darle muchísimo más peso
+        is_current_wc = False
+        if is_wc:
+            if isinstance(match['date'], str) and match['date'] >= '2026-06-11':
+                is_current_wc = True
+            elif hasattr(match['date'], 'year') and match['date'].year == 2026:
+                is_current_wc = True
+            elif hasattr(match['date'], 'to_pydatetime') and match['date'].to_pydatetime().year == 2026:
+                is_current_wc = True
+                
+        if is_current_wc:
+            combined_weight *= 15.0  # Damos muchísimo más peso a los partidos de este mundial
+        
         results.append({
             'result': res,
             'goals_scored': gs,
@@ -619,6 +648,30 @@ def compute_team_features_from_history(history_list, reference_date, n_recent=10
         recent_win_rate = 0.33
         recent_gs = 1.0
         recent_gc = 1.0
+        
+    # --- Forma reciente corta (últimos 3 partidos) ---
+    recent_short = results[:3]
+    if len(recent_short) > 0:
+        recent_short_wins = sum(1 for r in recent_short if r['result'] == 'W')
+        recent_short_win_rate = recent_short_wins / len(recent_short)
+        recent_short_gs = sum(r['goals_scored'] for r in recent_short) / len(recent_short)
+        recent_short_gc = sum(r['goals_conceded'] for r in recent_short) / len(recent_short)
+    else:
+        recent_short_win_rate = 0.33
+        recent_short_gs = 1.0
+        recent_short_gc = 1.0
+
+    # --- Forma reciente media (últimos 5 partidos) ---
+    recent_mid = results[:5]
+    if len(recent_mid) > 0:
+        recent_mid_wins = sum(1 for r in recent_mid if r['result'] == 'W')
+        recent_mid_win_rate = recent_mid_wins / len(recent_mid)
+        recent_mid_gs = sum(r['goals_scored'] for r in recent_mid) / len(recent_mid)
+        recent_mid_gc = sum(r['goals_conceded'] for r in recent_mid) / len(recent_mid)
+    else:
+        recent_mid_win_rate = 0.33
+        recent_mid_gs = 1.0
+        recent_mid_gc = 1.0
     
     # --- Rendimiento en partidos oficiales ---
     official = [r for r in results if r['is_official']]
@@ -653,6 +706,12 @@ def compute_team_features_from_history(history_list, reference_date, n_recent=10
         'recent_win_rate': recent_win_rate,
         'recent_goals_scored': recent_gs,
         'recent_goals_conceded': recent_gc,
+        'recent_short_win_rate': recent_short_win_rate,
+        'recent_short_goals_scored': recent_short_gs,
+        'recent_short_goals_conceded': recent_short_gc,
+        'recent_mid_win_rate': recent_mid_win_rate,
+        'recent_mid_goals_scored': recent_mid_gs,
+        'recent_mid_goals_conceded': recent_mid_gc,
         'official_win_rate': official_win_rate,
         'consistency': consistency,
         'matches_played': len(results),
@@ -713,9 +772,7 @@ def build_match_features_dynamic(team_a, team_b, elo_system, history_a, history_
     elo_a = elo_system.get_rating(ta)
     elo_b = elo_system.get_rating(tb)
     
-    # Odds
-    odds_a = BETTING_ODDS.get(ta, 0.001)
-    odds_b = BETTING_ODDS.get(tb, 0.001)
+
     
     # H2H (antes del partido)
     h2h = compute_h2h_features_from_history(history_a, tb, match_date)
@@ -755,7 +812,6 @@ def build_match_features_dynamic(team_a, team_b, elo_system, history_a, history_
         'fifa_rank_diff': rank_a['rank'] - rank_b['rank'],  # Negativo = A mejor
         'fifa_points_diff': rank_a['points'] - rank_b['points'],
         'elo_diff': elo_a - elo_b,
-        'odds_prob_diff': odds_a - odds_b,
         
         # --- Features del equipo A (relativas) ---
         'win_rate_diff': fa['weighted_win_rate'] - fb['weighted_win_rate'],
@@ -767,6 +823,16 @@ def build_match_features_dynamic(team_a, team_b, elo_system, history_a, history_
         'recent_form_diff': fa['recent_win_rate'] - fb['recent_win_rate'],
         'recent_attack_diff': fa['recent_goals_scored'] - fb['recent_goals_scored'],
         'recent_defense_diff': fb['recent_goals_conceded'] - fa['recent_goals_conceded'],  # Invertido
+        
+        # --- Forma reciente corta ---
+        'recent_short_form_diff': fa['recent_short_win_rate'] - fb['recent_short_win_rate'],
+        'recent_short_attack_diff': fa['recent_short_goals_scored'] - fb['recent_short_goals_scored'],
+        'recent_short_defense_diff': fb['recent_short_goals_conceded'] - fa['recent_short_goals_conceded'],
+        
+        # --- Forma reciente media ---
+        'recent_mid_form_diff': fa['recent_mid_win_rate'] - fb['recent_mid_win_rate'],
+        'recent_mid_attack_diff': fa['recent_mid_goals_scored'] - fb['recent_mid_goals_scored'],
+        'recent_mid_defense_diff': fb['recent_mid_goals_conceded'] - fa['recent_mid_goals_conceded'],
         
         # --- Rendimiento oficial ---
         'official_wr_diff': fa['official_win_rate'] - fb['official_win_rate'],
@@ -794,7 +860,6 @@ def build_match_features_dynamic(team_a, team_b, elo_system, history_a, history_
         # --- Absolutas combinadas ---
         'avg_elo': (elo_a + elo_b) / 2,
         'avg_fifa_points': (rank_a['points'] + rank_b['points']) / 2,
-        'combined_odds': odds_a + odds_b,
     }
     
     return features
@@ -1585,7 +1650,7 @@ def main():
     X, y, elo, team_history = build_training_dataset_sequential(df_raw)
     
     # Procesar también los resultados ya jugados del WC2026 en el sistema Elo y en el historial
-    print("\n📈 Actualizando Elo y registros con resultados jugados del Mundial 2026...")
+    print("\n📈 Actualizando Elo y registros con resultados jugados del Mundial 2026 (deduplicado)...")
     for r in WC2026_RESULTS:
         home_n = normalize_name(r['home'])
         away_n = normalize_name(r['away'])
@@ -1593,6 +1658,20 @@ def main():
         as_ = r['away_score']
         date_obj = pd.Timestamp(r['date']) # Pre-parsed Timestamp
         
+        # Evitar registrar duplicados si el partido ya se leyó de df_raw
+        already_registered = False
+        for h_match in team_history[home_n]:
+            h_opponent = normalize_name(h_match['opponent'])
+            h_date = h_match['date']
+            h_date_str = h_date.strftime('%Y-%m-%d') if hasattr(h_date, 'strftime') else str(h_date)[:10]
+            r_date_str = date_obj.strftime('%Y-%m-%d')
+            if h_opponent == away_n and h_date_str == r_date_str:
+                already_registered = True
+                break
+        
+        if already_registered:
+            continue
+            
         elo.update(
             home_team=home_n,
             away_team=away_n,

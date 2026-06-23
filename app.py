@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 
 # Asegurar encoding UTF-8 en Windows
@@ -218,41 +218,57 @@ def get_team_color(team, default='#1e293b'):
 # Cargar resultados en tiempo real con caching
 @st.cache_data(ttl=3600)  # Caché por 1 hora
 def fetch_online_results():
-    """Descarga los resultados actualizados de la Copa del Mundo 2026 desde GitHub."""
+    """Descarga los resultados actualizados de la Copa del Mundo 2026 desde GitHub y los combina con los locales sin duplicados."""
+    # Empezar con una copia de los resultados locales
+    results_map = {}
+    for r in pred.WC2026_RESULTS:
+        h = pred.normalize_name(r['home'])
+        a = pred.normalize_name(r['away'])
+        key = (min(h, a), max(h, a))
+        results_map[key] = {
+            'date': r['date'],
+            'home': h,
+            'away': a,
+            'home_score': int(r['home_score']),
+            'away_score': int(r['away_score']),
+            'group': r['group']
+        }
+
     url = "https://raw.githubusercontent.com/martj42/international_results/master/results.csv"
     try:
-        df = pd.read_csv(url)
-        df['date'] = pd.to_datetime(df['date'])
-        # Filtrar partidos de la Copa del Mundo 2026
-        df_wc = df[(df['tournament'] == 'FIFA World Cup') & (df['date'] >= pd.Timestamp('2026-06-11'))]
-        
-        online_results = []
-        for _, row in df_wc.iterrows():
-            home = pred.normalize_name(row['home_team'])
-            away = pred.normalize_name(row['away_team'])
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            df = pd.read_csv(StringIO(response.text))
+            df['date'] = pd.to_datetime(df['date'])
+            # Filtrar partidos de la Copa del Mundo 2026
+            df_wc = df[(df['tournament'] == 'FIFA World Cup') & (df['date'] >= pd.Timestamp('2026-06-11'))]
+            # Eliminar filas sin marcador (partidos no jugados aún)
+            df_wc = df_wc.dropna(subset=['home_score', 'away_score'])
             
-            # Buscar el grupo del partido
-            group = None
-            for g, teams in pred.WC2026_GROUPS.items():
-                if home in [pred.normalize_name(t) for t in teams]:
-                    group = g
-                    break
-                    
-            online_results.append({
-                'date': row['date'].strftime('%Y-%m-%d'),
-                'home': home,
-                'away': away,
-                'home_score': int(row['home_score']),
-                'away_score': int(row['away_score']),
-                'group': group
-            })
-        
-        if len(online_results) > 0:
-            return online_results
+            for _, row in df_wc.iterrows():
+                home = pred.normalize_name(row['home_team'])
+                away = pred.normalize_name(row['away_team'])
+                key = (min(home, away), max(home, away))
+                
+                # Buscar el grupo del partido
+                group = None
+                for g, teams in pred.WC2026_GROUPS.items():
+                    if home in [pred.normalize_name(t) for t in teams]:
+                        group = g
+                        break
+                        
+                results_map[key] = {
+                    'date': row['date'].strftime('%Y-%m-%d'),
+                    'home': home,
+                    'away': away,
+                    'home_score': int(row['home_score']),
+                    'away_score': int(row['away_score']),
+                    'group': group
+                }
     except Exception as e:
         pass
     
-    return pred.WC2026_RESULTS
+    return list(results_map.values())
 
 wc2026_results = fetch_online_results()
 
@@ -293,130 +309,7 @@ def load_pretrained_assets():
     }
     return model_data
 
-@st.cache_data(ttl=600)  # Caché por 10 minutos
-def fetch_live_odds(api_key):
-    """Obtiene cuotas reales de casas de apuestas usando The Odds API."""
-    if not api_key:
-        return {}
-    
-    url = "https://api.the-odds-api.com/v4/sports/soccer_fifa_world_cup/odds/"
-    params = {
-        'apiKey': api_key,
-        'regions': 'eu',  # Europa (Bet365, Codere, Bwin, etc.)
-        'markets': 'h2h',
-        'oddsFormat': 'decimal'
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            odds_cache = {}
-            for match in data:
-                home = pred.normalize_name(match['home_team'])
-                away = pred.normalize_name(match['away_team'])
-                
-                match_odds = {}
-                for bm in match.get('bookmakers', []):
-                    bm_name = bm['title']
-                    for market in bm.get('markets', []):
-                        if market['key'] == 'h2h':
-                            odds = {}
-                            for outcome in market['outcomes']:
-                                team = pred.normalize_name(outcome['name'])
-                                odds[team] = outcome['price']
-                            
-                            # Guardar cuotas de local, empate y visitante
-                            match_odds[bm_name] = {
-                                'home': odds.get(home, 1.0),
-                                'draw': odds.get('Draw', 1.0),
-                                'away': odds.get(away, 1.0)
-                            }
-                if len(match_odds) > 0:
-                    odds_cache[(home, away)] = match_odds
-                    # Guardar también en sentido inverso
-                    odds_cache[(away, home)] = {
-                        bm: {
-                            'home': odds_cache[(home, away)][bm]['away'],
-                            'draw': odds_cache[(home, away)][bm]['draw'],
-                            'away': odds_cache[(home, away)][bm]['home']
-                        } for bm in match_odds
-                    }
-            return odds_cache
-    except Exception as e:
-        pass
-    return {}
 
-def generate_stable_mock_odds(team_a, team_b, p_draw, p_win_a, p_win_b):
-    """Genera cuotas realistas y estables para varias casas de apuestas basadas en probabilidades de la IA."""
-    bookmakers = {
-        'Bet365': {'margin': 0.045, 'seed_offset': 1},
-        'Codere': {'margin': 0.060, 'seed_offset': 2},
-        'Bwin': {'margin': 0.050, 'seed_offset': 3},
-        '1xBet': {'margin': 0.035, 'seed_offset': 4}
-    }
-    
-    match_odds = {}
-    for bm_name, bm_cfg in bookmakers.items():
-        margin = bm_cfg['margin']
-        offset = bm_cfg['seed_offset']
-        
-        # Generar un seed pseudo-aleatorio basado en los nombres de los equipos
-        # para que las cuotas sean estables entre recargas de la página
-        val_str = f"{team_a}_{team_b}_{bm_name}_{offset}"
-        seed_val = sum(ord(c) for c in val_str)
-        
-        # Variación pseudo-aleatoria determinista para simular diferencias del mercado (90% a 110%)
-        var_a = 0.90 + ((seed_val % 21) / 100.0)
-        var_draw = 0.90 + (((seed_val + 5) % 21) / 100.0)
-        var_b = 0.90 + (((seed_val + 10) % 21) / 100.0)
-        
-        p_win_a_mod = p_win_a * var_a
-        p_draw_mod = p_draw * var_draw
-        p_win_b_mod = p_win_b * var_b
-        
-        # Normalizar a 1 + margen de la casa de apuestas
-        sum_mods = p_win_a_mod + p_draw_mod + p_win_b_mod
-        if sum_mods > 0:
-            target_sum = 1.0 + margin
-            p_win_a_final = (p_win_a_mod / sum_mods) * target_sum
-            p_draw_final = (p_draw_mod / sum_mods) * target_sum
-            p_win_b_final = (p_win_b_mod / sum_mods) * target_sum
-        else:
-            p_win_a_final = p_win_a * (1.0 + margin)
-            p_draw_final = p_draw * (1.0 + margin)
-            p_win_b_final = p_win_b * (1.0 + margin)
-            
-        odd_a = round(1.0 / p_win_a_final, 2) if p_win_a_final > 0 else 99.0
-        odd_draw = round(1.0 / p_draw_final, 2) if p_draw_final > 0 else 99.0
-        odd_b = round(1.0 / p_win_b_final, 2) if p_win_b_final > 0 else 99.0
-        
-        match_odds[bm_name] = {
-            'home': max(1.01, odd_a),
-            'draw': max(1.01, odd_draw),
-            'away': max(1.01, odd_b)
-        }
-    return match_odds
-
-def get_market_odd(bet_type, is_a_fav, bm_odds, p_under_3_5, p_over_1_5, p_both_score_no):
-    """Calcula u obtiene la cuota para un mercado de apuesta específico a partir de las de ganador."""
-    if "Gana Favorito" in bet_type:
-        odd = bm_odds['home'] if is_a_fav else bm_odds['away']
-        return round(odd, 2)
-    elif "Doble Oportunidad" in bet_type:
-        odd_fav = bm_odds['home'] if is_a_fav else bm_odds['away']
-        odd_draw = bm_odds['draw']
-        if odd_fav > 0 and odd_draw > 0:
-            implied_p = (1.0 / odd_fav) + (1.0 / odd_draw)
-            return round(1.0 / implied_p, 2)
-        return 1.20
-    elif "Menos de 3.5 Goles" in bet_type:
-        return round(1.0 / (p_under_3_5 * 1.05), 2)
-    elif "Más de 1.5 Goles" in bet_type:
-        return round(1.0 / (p_over_1_5 * 1.05), 2)
-    elif "Ambos marcan (NO)" in bet_type:
-        return round(1.0 / (p_both_score_no * 1.05), 2)
-    return 1.50
 
 # Mostrar pantalla de carga interactiva
 with st.spinner("🧠 Cargando assets pre-entrenados del modelo de IA... Esto será instantáneo."):
@@ -477,67 +370,7 @@ def get_match_prediction(team_a, team_b, active_model_name):
     
     return probs, features
 
-def get_safest_bet(team_a, team_b, active_model_name):
-    probs, _ = get_match_prediction(team_a, team_b, active_model_name)
-    p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
-    
-    ta = pred.normalize_name(team_a)
-    tb = pred.normalize_name(team_b)
-    
-    if p_win_a > p_win_b:
-        fav = ta
-        und = tb
-        fav_prob = p_win_a
-        is_a_fav = True
-    else:
-        fav = tb
-        und = ta
-        fav_prob = p_win_b
-        is_a_fav = False
-        
-    lc = model_vars['lambda_cache'].get((ta, tb))
-    lambda_total = 2.7
-    lambda_a_val = 1.35
-    lambda_b_val = 1.35
-    if lc:
-        lambda_a_val = lc['lambda_a']
-        lambda_b_val = lc['lambda_b']
-        lambda_total = lambda_a_val + lambda_b_val
-        
-    p_under_1_5 = math.exp(-lambda_total) * (1 + lambda_total)
-    p_over_1_5 = 1 - p_under_1_5
-    p_under_3_5 = math.exp(-lambda_total) * (1 + lambda_total + (lambda_total**2)/2 + (lambda_total**3)/6)
-    p_both_score = (1 - math.exp(-lambda_a_val)) * (1 - math.exp(-lambda_b_val))
-    p_both_score_no = 1 - p_both_score
-    
-    markets = [
-        ('Doble Oportunidad (Gana/Empata Favorito)', fav_prob + p_draw),
-        ('Menos de 3.5 Goles', p_under_3_5),
-        ('Más de 1.5 Goles', p_over_1_5),
-        ('Gana Favorito', fav_prob),
-        ('Ambos marcan (NO)', p_both_score_no)
-    ]
-    
-    safest_market, safest_prob = max(markets, key=lambda x: x[1])
-    return safest_market, safest_prob, fav, und, is_a_fav
 
-def check_bet_won(bet_type, is_a_fav, hs_a, hs_b):
-    if is_a_fav:
-        hs_fav, hs_und = hs_a, hs_b
-    else:
-        hs_fav, hs_und = hs_b, hs_a
-        
-    if "Doble Oportunidad" in bet_type:
-        return hs_fav >= hs_und
-    elif "Menos de 3.5" in bet_type:
-        return (hs_fav + hs_und) <= 3
-    elif "Más de 1.5" in bet_type:
-        return (hs_fav + hs_und) >= 2
-    elif "Gana Favorito" in bet_type:
-        return hs_fav > hs_und
-    elif "Ambos marcan (NO)" in bet_type:
-        return hs_fav == 0 or hs_und == 0
-    return False
 
 def calculate_expected_score(team_a, team_b):
     """
@@ -562,7 +395,6 @@ def calculate_expected_score(team_a, team_b):
             prob_a = (math.exp(-lambda_a) * (lambda_a ** g_a)) / math.factorial(g_a)
             prob_b = (math.exp(-lambda_b) * (lambda_b ** g_b)) / math.factorial(g_b)
             score_probs[(g_a, g_b)] = prob_a * prob_b
-            
     # Obtener el marcador con mayor probabilidad
     best_score = max(score_probs.items(), key=lambda x: x[1])
     most_likely_score = best_score[0]  # (goles_a, goles_b)
@@ -574,81 +406,158 @@ def calculate_expected_score(team_a, team_b):
 # =============================================================================
 st.markdown("<div class='main-title'>🏆 NaleScore - Mundial 2026</div>", unsafe_allow_html=True)
 
+# Helper flag emojis and date formatter
+FLAGS = {
+    'Argentina': '🇦🇷', 'Spain': '🇪🇸', 'France': '🇫🇷', 'England': '🏴󠁧󠁢󠁥󠁮󠁧󠁿',
+    'Portugal': '🇵🇹', 'Brazil': '🇧🇷', 'Morocco': '🇲🇦', 'Netherlands': '🇳🇱',
+    'Belgium': '🇧🇪', 'Germany': '🇩🇪', 'Croatia': '🇭🇷', 'Colombia': '🇨🇴',
+    'Mexico': '🇲🇽', 'Senegal': '🇸🇳', 'Uruguay': '🇺🇾', 'United States': '🇺🇸',
+    'Japan': '🇯🇵', 'Switzerland': '🇨🇭', 'Iran': '🇮🇷', 'Ecuador': '🇪🇨',
+    'Australia': '🇦🇺', 'Turkey': '🇹🇷', 'South Korea': '🇰🇷', 'Austria': '🇦🇹',
+    'Sweden': '🇸🇪', 'Egypt': '🇪🇬', 'Norway': '🇳🇴', 'Scotland': '🏴󠁧󠁢󠁳󠁣󠁴󠁿',
+    'Algeria': '🇩🇿', 'Tunisia': '🇹🇳', 'Paraguay': '🇵🇾', 'Ivory Coast': '🇨🇮',
+    'Czech Republic': '🇨🇿', 'Saudi Arabia': '🇸🇦', 'Ghana': '🇬🇭', 'Canada': '🇨🇦',
+    'Panama': '🇵🇦', 'Iraq': '🇮🇶', 'Jordan': '🇯🇴', 'Qatar': '🇶🇦',
+    'Uzbekistan': '🇺🇿', 'DR Congo': '🇨🇩', 'South Africa': '🇿🇦',
+    'Bosnia and Herzegovina': '🇧🇦', 'New Zealand': '🇳🇿', 'Cape Verde': '🇨🇻',
+    'Haiti': '🇭🇹', 'Curacao': '🇨🇼'
+}
+
+def get_flag(team):
+    return FLAGS.get(pred.normalize_name(team), '🏳️')
+
+def format_date_es(date_str):
+    try:
+        dt = datetime.strptime(date_str, '%Y-%m-%d')
+        months = ['Jun', 'Jul']
+        month_idx = dt.month - 6
+        return f"{dt.day} {months[month_idx]}"
+    except:
+        return date_str
+
+def generate_official_schedule():
+    group_offsets = {
+        'A': 0, 'B': 1, 'C': 2, 'D': 2,
+        'E': 3, 'F': 3, 'G': 4, 'H': 4,
+        'I': 5, 'J': 5, 'K': 6, 'L': 6
+    }
+    times = ['18:00', '21:00', '00:00', '03:00']
+    schedule = []
+    for r in [1, 2, 3]:
+        if r == 1:
+            start_date = datetime(2026, 6, 11)
+        elif r == 2:
+            start_date = datetime(2026, 6, 18)
+        else:
+            start_date = datetime(2026, 6, 24)
+            
+        for g, teams in pred.WC2026_GROUPS.items():
+            offset = group_offsets[g]
+            match_date = start_date + timedelta(days=offset)
+            date_str = match_date.strftime('%Y-%m-%d')
+            g_idx = list(pred.WC2026_GROUPS.keys()).index(g)
+            
+            t1, t2, t3, t4 = teams[0], teams[1], teams[2], teams[3]
+            if r == 1:
+                schedule.append({'group': g, 'round': r, 'home': t1, 'away': t2, 'date': date_str, 'time': times[(g_idx * 2) % 4]})
+                schedule.append({'group': g, 'round': r, 'home': t3, 'away': t4, 'date': date_str, 'time': times[(g_idx * 2 + 1) % 4]})
+            elif r == 2:
+                schedule.append({'group': g, 'round': r, 'home': t1, 'away': t3, 'date': date_str, 'time': times[(g_idx * 2 + 1) % 4]})
+                schedule.append({'group': g, 'round': r, 'home': t4, 'away': t2, 'date': date_str, 'time': times[(g_idx * 2) % 4]})
+            elif r == 3:
+                schedule.append({'group': g, 'round': r, 'home': t1, 'away': t4, 'date': date_str, 'time': times[(g_idx * 2) % 4]})
+                schedule.append({'group': g, 'round': r, 'home': t3, 'away': t2, 'date': date_str, 'time': times[(g_idx * 2 + 1) % 4]})
+    return schedule
+
+def display_match_details(team_a, team_b, real_home_score=None, real_away_score=None):
+    # Execute prediction
+    probs, raw_features = get_match_prediction(team_a, team_b, selected_model_name)
+    p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
+    
+    # Expected score
+    lambda_a, lambda_b, expected_score, score_probs = calculate_expected_score(team_a, team_b)
+    
+    col_left, col_right = st.columns([5, 5])
+    
+    with col_left:
+        st.markdown("##### 📊 Probabilidades de Resultado (1X2)")
+        labels = [f"Gana {team_a}", "Empate", f"Gana {team_b}"]
+        values = [p_win_a * 100, p_draw * 100, p_win_b * 100]
+        color_a = get_team_color(team_a, "#2563EB")
+        color_b = get_team_color(team_b, "#DC2626")
+        colors_list = [color_a, '#64748B', color_b]
+        
+        fig = go.Figure(go.Bar(
+            x=values,
+            y=labels,
+            orientation='h',
+            marker_color=colors_list,
+            text=[f"{v:.1f}%" for v in values],
+            textposition='inside',
+            textfont=dict(size=13, color='white', weight='bold'),
+            hovertemplate='%{y}: <b>%{x:.2f}%</b><extra></extra>'
+        ))
+        fig.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=200,
+            xaxis=dict(showgrid=True, gridcolor='#334155', range=[0, 105]),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=12, color='#F8FAFC'))
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+
+
+    with col_right:
+        st.markdown("##### ⚽ Marcador Esperado & Matriz de Goles")
+        st.markdown(f"""
+        <div style='background-color: #1E293B; border-radius: 10px; padding: 12px; border: 1px solid #334155; text-align: center; margin-bottom: 10px;'>
+            <span style='font-size: 0.8rem; color: #94A3B8; text-transform: uppercase; font-weight: 700;'>Marcador más probable</span>
+            <div style='font-size: 2.2rem; font-weight: 900; color: #38BDF8;'>{expected_score[0]} - {expected_score[1]}</div>
+            <div style='font-size: 0.8rem; color: #64748B;'>Lambdas: {team_a} ({lambda_a:.2f}) vs {team_b} ({lambda_b:.2f})</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Heatmap matrix
+        matrix_data = []
+        for g_b in range(5):
+            row = []
+            for g_a in range(5):
+                row.append(score_probs[(g_a, g_b)] * 100)
+            matrix_data.append(row)
+            
+        fig_heat = go.Figure(data=go.Heatmap(
+            z=matrix_data,
+            x=[f"{g} gol(es) {team_a}" for g in range(5)],
+            y=[f"{g} gol(es) {team_b}" for g in range(5)],
+            colorscale='Viridis',
+            text=[[f"{val:.1f}%" for val in r] for r in matrix_data],
+            texttemplate="%{text}",
+            hovertemplate=f"Goles {team_a}: %{{x}}<br>Goles {team_b}: %{{y}}<br>Probabilidad: <b>%{{z:.2f}}%</b><extra></extra>"
+        ))
+        fig_heat.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=200,
+            xaxis=dict(tickangle=0, tickfont=dict(size=10, color='#94A3B8')),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=10, color='#94A3B8'))
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
 if model_ready:
     # Sidebar: Selección del partido
     st.sidebar.markdown("### ⚙️ Panel de Control")
     
-    mode = st.sidebar.radio(
-        "Tipo de Simulación:",
-        ["🏆 Fase de Grupos Oficial", "⚔️ Enfrentamiento Personalizado (Fantasía)"]
+    simulation_mode = st.sidebar.radio(
+        "Ver en la interfaz:",
+        ["🏆 Calendario Mundial 2026", "⚔️ Enfrentamiento Fantasía (Personalizado)"]
     )
     
-    # Inicializar equipos seleccionados
-    team_a, team_b = None, None
-    is_played_match = False
-    real_home_score, real_away_score = None, None
-    selected_group_name = None
-    
-    if mode == "🏆 Fase de Grupos Oficial":
-        groups = sorted(list(pred.WC2026_GROUPS.keys()))
-        selected_group_name = st.sidebar.selectbox("Selecciona el Grupo:", groups)
-        group_teams = pred.WC2026_GROUPS[selected_group_name]
-        
-        # Generar las 6 combinaciones de partidos del grupo
-        group_matches = []
-        for i in range(len(group_teams)):
-            for j in range(i + 1, len(group_teams)):
-                ta = pred.normalize_name(group_teams[i])
-                tb = pred.normalize_name(group_teams[j])
-                
-                # Buscar si ya se ha jugado
-                played_info = None
-                for r in wc2026_results:
-                    r_home = pred.normalize_name(r['home'])
-                    r_away = pred.normalize_name(r['away'])
-                    if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
-                        played_info = r
-                        break
-                
-                if played_info:
-                    status = f"✅ {ta} vs {tb} (Jugado: {played_info['home_score']}-{played_info['away_score']})"
-                else:
-                    status = f"⏳ {ta} vs {tb} (Pendiente)"
-                
-                group_matches.append((ta, tb, status, played_info))
-        
-        match_options = [m[2] for m in group_matches]
-        selected_match_idx = st.sidebar.selectbox("Selecciona el Partido:", range(len(match_options)), format_func=lambda x: match_options[x])
-        
-        team_a = group_matches[selected_match_idx][0]
-        team_b = group_matches[selected_match_idx][1]
-        played_info = group_matches[selected_match_idx][3]
-        
-        if played_info:
-            is_played_match = True
-            # Mantener orden correspondiente del marcador real
-            if pred.normalize_name(played_info['home']) == team_a:
-                real_home_score = played_info['home_score']
-                real_away_score = played_info['away_score']
-            else:
-                real_home_score = played_info['away_score']
-                real_away_score = played_info['home_score']
-                # Invertir el orden para que coincida con el selector
-                team_a, team_b = team_b, team_a
-                
-    else:
-        # Modo Fantasía
-        all_teams = sorted(pred.ALL_WC_TEAMS)
-        team_a = st.sidebar.selectbox("Selecciona Equipo Local (A):", all_teams, index=0)
-        # Filtrar equipo A del selector B
-        remaining_teams = [t for t in all_teams if t != team_a]
-        team_b = st.sidebar.selectbox("Selecciona Equipo Visitante (B):", remaining_teams, index=0)
-        
-    # Configuración de Inteligencia Artificial
+    # Selector de modelos
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"**🤖 Configuración de IA:**")
-    
-    # Selector de modelos
     available_models = list(model_vars['models'].keys())
     default_idx = available_models.index(model_vars['model_name']) if model_vars['model_name'] in available_models else 0
     selected_model_name = st.sidebar.selectbox(
@@ -663,836 +572,173 @@ if model_ready:
     st.sidebar.markdown(f"• **Precisión (CV):** `{metrics['accuracy_mean']*100:.2f}%` (+/- `{metrics['accuracy_std']*100:.1f}%`)")
     st.sidebar.markdown(f"• **F1-Score Macro:** `{metrics['f1_mean']:.3f}`")
     st.sidebar.markdown(f"• **Log Loss:** `{metrics['log_loss_mean']:.3f}`")
-    st.sidebar.markdown(f"• **Partidos de Entrenamiento:** `3,760`")
+    st.sidebar.markdown(f"• **Partidos de Entrenamiento:** `3,768`")
     
-    # Configuración de Cuotas en Vivo (Opcional)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(f"**🔑 API de Cuotas en Vivo (Opcional):**")
-    odds_api_key = st.sidebar.text_input(
-        "API Key (the-odds-api.com):",
-        type="password",
-        help="Introduce tu API Key gratuita de The Odds API para ver cuotas reales de Bet365, Codere, etc. en tiempo real."
-    )
-    
-    # Cargar cuotas en vivo
-    live_odds = fetch_live_odds(odds_api_key)
 
-    # =============================================================================
-    # PESTAÑAS PRINCIPALES DEL DASHBOARD
-    # =============================================================================
-    tab_prediction, tab_explain, tab_global, tab_betting = st.tabs([
-        "📊 Predicción de Partido", 
-        "💡 Explicabilidad y Comparativa", 
-        "📈 Análisis Global del Torneo",
-        "🎯 Consejos de Apuestas (Seguras)"
-    ])
-    
-    # Ejecutar predicción
-    probs, raw_features = get_match_prediction(team_a, team_b, selected_model_name)
-    p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
-    
-    # Calcular marcador esperado
-    elo_a = model_vars['elo'].get_rating(team_a)
-    elo_b = model_vars['elo'].get_rating(team_b)
-    fa = model_vars['features_cache'].get(team_a, {})
-    fb = model_vars['features_cache'].get(team_b, {})
-    
-    lambda_a, lambda_b, expected_score, score_probs = calculate_expected_score(
-        team_a, team_b
-    )
 
-    # -------------------------------------------------------------------------
-    # TAB 1: PREDICCIÓN DE PARTIDO
-    # -------------------------------------------------------------------------
-    with tab_prediction:
-        # Encabezado visual de enfrentamiento (Tarjetas de Equipos)
-        col_team_a, col_vs, col_team_b = st.columns([4, 2, 4])
-        
-        color_a = get_team_color(team_a, "#2563EB")
-        color_b = get_team_color(team_b, "#DC2626")
-        
-        sv_a = pred.get_squad_value(team_a)
-        conf_a = pred.get_confederation(team_a)
-        is_host_a = team_a in ['United States', 'Mexico', 'Canada']
-        host_badge_a = "🇺🇸🇲🇽🇨🇦 Anfitrión" if is_host_a else ""
-        
-        with col_team_a:
-            st.markdown(f"""
-            <div class='card' style='border-top: 6px solid {color_a}; text-align: center;'>
-                <div style='font-size: 4rem;'>🇺🇳</div>
-                <div class='team-header-a' style='text-align: center; color: #F8FAFC;'>{team_a}</div>
-                <div style='font-size: 0.9rem; color: #38BDF8; font-weight: 700; height: 20px;'>{host_badge_a}</div>
-                <div style='margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;'>
-                    <div>
-                        <div class='metric-label'>Ranking FIFA</div>
-                        <div class='metric-value'>#{pred.FIFA_RANKINGS.get(team_a, {}).get('rank', 'N/A')}</div>
-                    </div>
-                    <div>
-                        <div class='metric-label'>Rating ELO</div>
-                        <div class='metric-value'>{elo_a:.0f}</div>
-                    </div>
-                    <div>
-                        <div class='metric-label'>Valor Plantilla</div>
-                        <div class='metric-value'>{sv_a:.1f} M€</div>
-                    </div>
-                    <div>
-                        <div class='metric-label'>Confederación</div>
-                        <div class='metric-value'>{conf_a}</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+    # Main Content
+    if simulation_mode == "🏆 Calendario Mundial 2026":
+        # Filters and Search
+        col_f1, col_f2 = st.columns([6, 4])
+        with col_f1:
+            category_filter = st.radio(
+                "Categoría del Partido:",
+                ["Todos", "⏳ Próximos / Pendientes", "✅ Jugados"],
+                horizontal=True
+            )
+        with col_f2:
+            search_query = st.text_input("🔍 Buscar selección...", "").strip().lower()
             
-        with col_vs:
-            st.markdown("<div style='height: 40px;'></div>", unsafe_allow_html=True)
-            st.markdown("<div class='vs-badge'>VS</div>", unsafe_allow_html=True)
-            if is_played_match:
-                st.markdown(f"""
-                <div style='text-align: center; margin-top: 20px;'>
-                    <span style='background-color: #059669; color: white; padding: 6px 12px; border-radius: 20px; font-weight: 800; font-size: 0.85rem;'>
-                        JUGADO
-                    </span>
-                    <div style='font-size: 2.2rem; font-weight: 900; color: #10B981; margin-top: 5px;'>
-                        {real_home_score} - {real_away_score}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-            elif selected_group_name:
-                st.markdown(f"""
-                <div style='text-align: center; margin-top: 20px;'>
-                    <span style='background-color: #3B82F6; color: white; padding: 6px 12px; border-radius: 20px; font-weight: 800; font-size: 0.85rem;'>
-                        GRUPO {selected_group_name}
-                    </span>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown("""
-                <div style='text-align: center; margin-top: 20px;'>
-                    <span style='background-color: #6366F1; color: white; padding: 6px 12px; border-radius: 20px; font-weight: 800; font-size: 0.85rem;'>
-                        FANTASÍA
-                    </span>
-                </div>
-                """, unsafe_allow_html=True)
-            
-        sv_b = pred.get_squad_value(team_b)
-        conf_b = pred.get_confederation(team_b)
-        is_host_b = team_b in ['United States', 'Mexico', 'Canada']
-        host_badge_b = "🇺🇸🇲🇽🇨🇦 Anfitrión" if is_host_b else ""
+        # Get schedule
+        schedule = generate_official_schedule()
         
-        with col_team_b:
-            st.markdown(f"""
-            <div class='card' style='border-top: 6px solid {color_b}; text-align: center;'>
-                <div style='font-size: 4rem;'>🇺🇳</div>
-                <div class='team-header-b' style='text-align: center; color: #F8FAFC;'>{team_b}</div>
-                <div style='font-size: 0.9rem; color: #38BDF8; font-weight: 700; height: 20px;'>{host_badge_b}</div>
-                <div style='margin-top: 15px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px;'>
-                    <div>
-                        <div class='metric-label'>Ranking FIFA</div>
-                        <div class='metric-value'>#{pred.FIFA_RANKINGS.get(team_b, {}).get('rank', 'N/A')}</div>
-                    </div>
-                    <div>
-                        <div class='metric-label'>Rating ELO</div>
-                        <div class='metric-value'>{elo_b:.0f}</div>
-                    </div>
-                    <div>
-                        <div class='metric-label'>Valor Plantilla</div>
-                        <div class='metric-value'>{sv_b:.1f} M€</div>
-                    </div>
-                    <div>
-                        <div class='metric-label'>Confederación</div>
-                        <div class='metric-value'>{conf_b}</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
         st.markdown("---")
         
-        # Probabilidades y Marcador Esperado
-        col_left, col_right = st.columns([5, 5])
-        
-        with col_left:
-            st.markdown("### 📊 Probabilidades de Resultado")
+        matches_rendered = 0
+        for m in schedule:
+            home_norm = pred.normalize_name(m['home'])
+            away_norm = pred.normalize_name(m['away'])
             
-            # Gráfico de Plotly para probabilidades
-            labels = [f"Victoria {team_a}", "Empate", f"Victoria {team_b}"]
-            values = [p_win_a * 100, p_draw * 100, p_win_b * 100]
-            colors_list = [color_a, '#64748B', color_b]
-            
-            fig = go.Figure(go.Bar(
-                x=values,
-                y=labels,
-                orientation='h',
-                marker_color=colors_list,
-                text=[f"{v:.1f}%" for v in values],
-                textposition='inside',
-                textfont=dict(size=14, color='white', weight='bold'),
-                hovertemplate='%{y}: <b>%{x:.2f}%</b><extra></extra>'
-            ))
-            
-            fig.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                margin=dict(l=20, r=20, t=10, b=10),
-                height=300,
-                xaxis=dict(showgrid=True, gridcolor='#334155', range=[0, 105], title="Probabilidad (%)"),
-                yaxis=dict(autorange="reversed", tickfont=dict(size=12, color='#F8FAFC'))
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Mensaje analítico en español
-            fav = team_a if p_win_a > p_win_b else team_b
-            max_prob = max(p_win_a, p_win_b)
-            dif_ratio = abs(p_win_a - p_win_b) * 100
-            
-            if dif_ratio < 5:
-                resumen_txt = f"⚖️ **Partido sumamente equilibrado**. El modelo no visualiza un claro favorito, dando un empate con un **{p_draw*100:.1f}%** o una victoria marginal para cualquiera de los dos lados."
-            elif dif_ratio < 20:
-                resumen_txt = f"📈 **Ligera ventaja para {fav}**. El modelo de IA le otorga un **{max_prob*100:.1f}%** de probabilidad de ganar frente a la otra selección."
-            else:
-                resumen_txt = f"🔥 **{fav} es claro favorito**. Las features recopiladas (Elo, Ranking yOdds) le otorgan una sólida probabilidad de victoria del **{max_prob*100:.1f}%**."
-                
-            st.info(resumen_txt)
-            
-            # Comparación con cuotas reales en vivo si hay API Key
-            ia_odd_win_a = 1.0 / p_win_a if p_win_a > 0 else 99.0
-            ia_odd_draw = 1.0 / p_draw if p_draw > 0 else 99.0
-            ia_odd_win_b = 1.0 / p_win_b if p_win_b > 0 else 99.0
-            
-            matchup_odds = live_odds.get((team_a, team_b))
-            is_mock_odds = False
-            if not matchup_odds:
-                is_mock_odds = True
-                matchup_odds = generate_stable_mock_odds(team_a, team_b, p_draw, p_win_a, p_win_b)
-                
-            if matchup_odds:
-                st.markdown("##### 🎲 Comparación con Casas de Apuestas")
-                if is_mock_odds:
-                    st.caption("🟠 *Mostrando cuotas estimadas por IA (Simulación con Margen ~5%). Introduce tu API Key en la barra lateral para cuotas reales en vivo.*")
+            # Check if match is played in real-time
+            played_info = None
+            for r in wc2026_results:
+                r_home = pred.normalize_name(r['home'])
+                r_away = pred.normalize_name(r['away'])
+                if (r_home == home_norm and r_away == away_norm) or (r_home == away_norm and r_away == home_norm):
+                    played_info = r
+                    break
+                    
+            # Determine status and scores
+            is_played = played_info is not None
+            real_h_score, real_a_score = None, None
+            if is_played:
+                if pred.normalize_name(played_info['home']) == home_norm:
+                    real_h_score = played_info['home_score']
+                    real_a_score = played_info['away_score']
                 else:
-                    st.caption("🟢 *Mostrando cuotas en vivo desde The Odds API.*")
+                    real_h_score = played_info['away_score']
+                    real_a_score = played_info['home_score']
+            
+            # Apply category filter
+            if category_filter == "⏳ Próximos / Pendientes" and is_played:
+                continue
+            if category_filter == "✅ Jugados" and not is_played:
+                continue
                 
-                # Selector interactivo de casa de apuestas
-                bm_choice = st.selectbox(
-                    "Selecciona la Casa de Apuestas:",
-                    options=list(matchup_odds.keys()),
-                    index=0,
-                    key=f"bm_choice_{team_a}_{team_b}"
-                )
-                bm_odds = matchup_odds[bm_choice]
+            # Apply search filter
+            if search_query:
+                if search_query not in home_norm.lower() and search_query not in away_norm.lower():
+                    continue
+            
+            # Get expected score
+            _, _, expected_score, _ = calculate_expected_score(home_norm, away_norm)
+            exp_h_score, exp_a_score = expected_score[0], expected_score[1]
+            
+            # Build Expander Title
+            date_es = format_date_es(m['date'])
+            home_flag = get_flag(home_norm)
+            away_flag = get_flag(away_norm)
+            
+            status_text = ""
+            
+            if is_played:
+                status_text = f"✅ Real: {real_h_score} - {real_a_score} | IA Esperado: {exp_h_score} - {exp_a_score}"
                 
-                val_win_a = "🔥 VALOR (+EV)" if bm_odds['home'] > ia_odd_win_a else "Sin Valor"
-                val_draw = "🔥 VALOR (+EV)" if bm_odds['draw'] > ia_odd_draw else "Sin Valor"
-                val_win_b = "🔥 VALOR (+EV)" if bm_odds['away'] > ia_odd_win_b else "Sin Valor"
-                
-                comp_odds_data = {
-                    'Resultado': [f"Gana {team_a}", "Empate", f"Gana {team_b}"],
-                    'Probabilidad IA': [f"{p_win_a*100:.1f}%", f"{p_draw*100:.1f}%", f"{p_win_b*100:.1f}%"],
-                    'Cuota Justa IA': [f"@{ia_odd_win_a:.2f}", f"@{ia_odd_draw:.2f}", f"@{ia_odd_win_b:.2f}"],
-                    f'Cuota Real ({bm_choice})': [f"@{bm_odds['home']:.2f}", f"@{bm_odds['draw']:.2f}", f"@{bm_odds['away']:.2f}"],
-                    'Valoración': [val_win_a, val_draw, val_win_b]
-                }
-                
-                df_comp_odds = pd.DataFrame(comp_odds_data)
-                st.dataframe(df_comp_odds.set_index('Resultado'), use_container_width=True)
-                st.info(f"💡 **Valor (+EV):** Ocurre cuando la cuota real de la casa de apuestas es mayor que la cuota justa estimada por la IA, representando una oportunidad matemática rentable a largo plazo.")
-
-        with col_right:
-            st.markdown("### ⚽ Marcador Esperado (Poisson)")
-            
-            # Marcador destacado
-            st.markdown(f"""
-            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center; margin-bottom: 20px;'>
-                <div style='font-size: 1.1rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.1em;'>
-                    Marcador Más Probable
-                </div>
-                <div style='font-size: 4rem; font-weight: 900; color: #38BDF8; margin: 10px 0;'>
-                    {expected_score[0]} - {expected_score[1]}
-                </div>
-                <div style='font-size: 0.95rem; color: #64748B;'>
-                    Tasa de goles esperada: <b>{team_a} ({lambda_a:.2f})</b> vs <b>{team_b} ({lambda_b:.2f})</b>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Generar matriz/heatmap de marcadores
-            matrix_data = []
-            for g_b in range(5): # Goles B en columnas
-                row = []
-                for g_a in range(5): # Goles A en filas
-                    row.append(score_probs[(g_a, g_b)] * 100)
-                matrix_data.append(row)
-                
-            fig_heat = go.Figure(data=go.Heatmap(
-                z=matrix_data,
-                x=[f"{g} Goles {team_a}" for g in range(5)],
-                y=[f"{g} Goles {team_b}" for g in range(5)],
-                colorscale='Viridis',
-                text=[[f"{val:.1f}%" for val in r] for r in matrix_data],
-                texttemplate="%{text}",
-                hovertemplate=f"Goles {team_a}: %{{x}}<br>Goles {team_b}: %{{y}}<br>Probabilidad: <b>%{{z:.2f}}%</b><extra></extra>"
-            ))
-            
-            fig_heat.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                margin=dict(l=20, r=20, t=10, b=10),
-                height=300,
-                xaxis=dict(tickangle=0),
-                yaxis=dict(autorange="reversed")
-            )
-            
-            st.plotly_chart(fig_heat, use_container_width=True)
-
-    # -------------------------------------------------------------------------
-    # TAB 2: EXPLICABILIDAD Y COMPARATIVA
-    # -------------------------------------------------------------------------
-    # TAB 2: EXPLICABILIDAD Y COMPARATIVA
-    # -------------------------------------------------------------------------
-    with tab_explain:
-        st.markdown("### 💡 Explicabilidad del Modelo: ¿Por qué predice esto?")
-        st.write("A continuación se muestra el **Balance de Ventajas**. Las barras hacia la **derecha** representan ventajas para **" + team_a + "**, y hacia la **izquierda** representan ventajas para **" + team_b + "**.")
-        
-        # Calcular ventajas normalizadas para el gráfico
-        mom_a = compute_wc2026_momentum(team_a)
-        mom_b = compute_wc2026_momentum(team_b)
-        
-        adv_features = {
-            'Rating ELO': raw_features.get('elo_diff', 0.0) / 150.0, # Normalizado (1.0 = ventaja de 150 puntos)
-            'Ranking FIFA': -raw_features.get('fifa_rank_diff', 0.0) / 15.0,
-            'Probabilidad Apuestas': raw_features.get('odds_prob_diff', 0.0) * 8.0,
-            'Valor de Plantilla': raw_features.get('squad_value_diff', 0.0) / 300.0,
-            'Fuerza de Confederación': raw_features.get('conf_strength_diff', 0.0) / 2.0,
-            'Efecto Localía / Anfitrión': raw_features.get('host_advantage_diff', 0.0) * 1.5,
-            'Forma Reciente': raw_features.get('recent_form_diff', 0.0) * 3.0,
-            'Historial H2H': (raw_features.get('h2h_win_rate', 0.5) - 0.5) * 4.0,
-            'Capacidad Goleadora': raw_features.get('goals_scored_diff', 0.0) * 1.0,
-            'Solidez Defensiva': -raw_features.get('goals_conceded_diff', 0.0) * 1.0, # Invertido (menos encajados es mejor)
-            'Momentum del Mundial': (mom_a['wc26_points_per_game'] - mom_b['wc26_points_per_game']) * 0.5
-        }
-        
-        categories = list(adv_features.keys())
-        values_adv = list(adv_features.values())
-        
-        # Determinar colores para las barras (si es positivo color_a, si es negativo color_b)
-        bar_colors = [color_a if v >= 0 else color_b for v in values_adv]
-        
-        fig_adv = go.Figure(go.Bar(
-            x=values_adv,
-            y=categories,
-            orientation='h',
-            marker_color=bar_colors,
-            hovertemplate='Factor: <b>%{y}</b><br>Ventaja Relativa: <b>%{x:.2f}</b><extra></extra>'
-        ))
-        
-        fig_adv.update_layout(
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=40, r=40, t=10, b=10),
-            height=450,
-            xaxis=dict(
-                title=f"⬅️ Favorece a {team_b}  |  Favorece a {team_a} ➡️",
-                showgrid=True,
-                gridcolor='#334155',
-                zeroline=True,
-                zerolinecolor='#64748B',
-                zerolinewidth=2
-            ),
-            yaxis=dict(tickfont=dict(size=12, color='#F8FAFC'))
-        )
-        
-        st.plotly_chart(fig_adv, use_container_width=True)
-        
-        # Tabla detallada de comparación
-        st.markdown("### 📋 Comparación Numérica Detallada")
-        
-        # Obtener confederaciones y squad values
-        sv_a = pred.get_squad_value(team_a)
-        sv_b = pred.get_squad_value(team_b)
-        conf_a = pred.get_confederation(team_a)
-        conf_b = pred.get_confederation(team_b)
-        
-        comp_data = {
-            'Métrica': [
-                'Confederación', 'Valor de Plantilla (M€)', 'Puntos Ranking FIFA', 'Rating ELO Actual', 'Odds de Apuestas (%)', 
-                'Win Rate Histórico Ponderado', 'Goles Marcados Históricos (Med.)', 
-                'Goles Recibidos Históricos (Med.)', 'Partidos en el Mundial Actual', 
-                'Puntos por Partido (Mundial)'
-            ],
-            team_a: [
-                conf_a,
-                f"{sv_a:.1f} M€",
-                f"{pred.FIFA_RANKINGS.get(team_a, {}).get('points', 0):.1f} (Rank #{pred.FIFA_RANKINGS.get(team_a, {}).get('rank', 0)})",
-                f"{elo_a:.0f}",
-                f"{pred.BETTING_ODDS.get(team_a, 0.001)*100:.2f}%",
-                f"{fa.get('weighted_win_rate', 0)*100:.1f}%",
-                f"{fa.get('weighted_goals_scored', 0):.2f}",
-                f"{fa.get('weighted_goals_conceded', 0):.2f}",
-                f"{mom_a['wc26_matches']}",
-                f"{mom_a['wc26_points_per_game']:.2f}"
-            ],
-            team_b: [
-                conf_b,
-                f"{sv_b:.1f} M€",
-                f"{pred.FIFA_RANKINGS.get(team_b, {}).get('points', 0):.1f} (Rank #{pred.FIFA_RANKINGS.get(team_b, {}).get('rank', 0)})",
-                f"{elo_b:.0f}",
-                f"{pred.BETTING_ODDS.get(team_b, 0.001)*100:.2f}%",
-                f"{fb.get('weighted_win_rate', 0)*100:.1f}%",
-                f"{fb.get('weighted_goals_scored', 0):.2f}",
-                f"{fb.get('weighted_goals_conceded', 0):.2f}",
-                f"{mom_b['wc26_matches']}",
-                f"{mom_b['wc26_points_per_game']:.2f}"
-            ]
-        }
-        
-        st.table(pd.DataFrame(comp_data).set_index('Métrica'))
-
-    # -------------------------------------------------------------------------
-    # TAB 3: ANÁLISIS GLOBAL DEL TORNEO
-    # -------------------------------------------------------------------------
-    with tab_global:
-        st.markdown("### 📈 Análisis Global del Torneo y Modelado")
-        st.write("Esta sección presenta las visualizaciones generadas por el pipeline de entrenamiento del script principal de Machine Learning.")
-        
-        # Verificar si las imágenes pre-generadas existen en el directorio output
-        output_dir = pred.OUTPUT_DIR
-        
-        img_winner = os.path.join(output_dir, 'winner_predictions.png')
-        img_stages = os.path.join(output_dir, 'stage_progression.png')
-        img_importance = os.path.join(output_dir, 'feature_importance.png')
-        img_models = os.path.join(output_dir, 'model_comparison.png')
-        
-        col_g1, col_g2 = st.columns([5, 5])
-        
-        with col_g1:
-            st.markdown("#### 🏆 Probabilidades de Ganar el Mundial 2026 (Top 20)")
-            if os.path.exists(img_winner):
-                st.image(img_winner, use_container_width=True)
-            else:
-                st.info("ℹ️ Ejecuta el script principal `wc2026_predictor.py` para generar la predicción completa del torneo.")
-                
-            st.markdown("#### 📊 Importancia de Variables en la IA")
-            if os.path.exists(img_importance):
-                st.image(img_importance, use_container_width=True)
-            else:
-                st.info("ℹ️ Imagen de importancia de variables no encontrada en 'output/'.")
-                
-        with col_g2:
-            st.markdown("#### 📈 Progresión por Rondas de los Favoritos (Top 10)")
-            if os.path.exists(img_stages):
-                st.image(img_stages, use_container_width=True)
-            else:
-                st.info("ℹ️ Ejecuta la simulación completa del torneo para ver las probabilidades de progression.")
-                
-            st.markdown("#### 🤖 Comparación de Métricas de Modelos ML")
-            if os.path.exists(img_models):
-                st.image(img_models, use_container_width=True)
-            else:
-                st.info("ℹ️ Imagen de comparación de modelos no encontrada en 'output/'.")
-
-    # -------------------------------------------------------------------------
-    # TAB 4: CONSEJOS DE APUESTAS (SEGURAS)
-    # -------------------------------------------------------------------------
-    with tab_betting:
-        st.markdown("### 🎯 Consejos y Pronósticos de Apuestas de Alta Probabilidad")
-        st.write("Basado en 5,000 simulaciones completas de Monte Carlo del Mundial 2026 y la calibración de goles de la distribución de Poisson.")
-        st.markdown("💡 *Los resultados reales de los partidos se obtienen online y en tiempo real desde GitHub. Los partidos pasados se marcan como biased porque sus características ya incluyen el resultado post-partido, mientras que los partidos pendientes son predicciones puras sin sesgo.*")
-        
-        # Calcular estadísticas globales de acierto para partidos jugados
-        total_bets = 0
-        won_bets = 0
-        played_bets_data = []
-        
-        for r in wc2026_results:
-            ta = pred.normalize_name(r['home'])
-            tb = pred.normalize_name(r['away'])
-            hs_a = r['home_score']
-            hs_b = r['away_score']
-            
-            # Obtener apuesta recomendada
-            bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
-            is_won = check_bet_won(bet_type, is_a_fav, hs_a, hs_b)
-            
-            total_bets += 1
-            if is_won:
-                won_bets += 1
-                
-            played_bets_data.append({
-                'Grupo': f"Grupo {r.get('group', 'N/A')}",
-                'Partido': f"{ta} vs {tb}",
-                'Resultado Real': f"{hs_a} - {hs_b}",
-                'Apuesta Realizada': f"{bet_type}",
-                'Prob. Estimada': f"{prob*100:.1f}%",
-                'Estado': "✅ ACERTADA" if is_won else "❌ FALLADA",
-                'Tipo Evaluación': "⚠️ BIASED (A Posteriori)"
-            })
-            
-        accuracy = (won_bets / total_bets * 100) if total_bets > 0 else 0.0
-        
-        # Renderizar Tarjetas de Estadísticas de Acierto
-        col_acc_1, col_acc_2, col_acc_3 = st.columns(3)
-        with col_acc_1:
-            st.markdown(f"""
-            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center;'>
-                <div style='font-size: 0.85rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;'>Partidos Evaluados (API)</div>
-                <div style='font-size: 2.2rem; font-weight: 900; color: #38BDF8;'>{total_bets}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_acc_2:
-            st.markdown(f"""
-            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center;'>
-                <div style='font-size: 0.85rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;'>Apuestas Acertadas</div>
-                <div style='font-size: 2.2rem; font-weight: 900; color: #10B981;'>{won_bets}</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col_acc_3:
-            st.markdown(f"""
-            <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border: 1px solid #334155; text-align: center;'>
-                <div style='font-size: 0.85rem; color: #94A3B8; text-transform: uppercase; font-weight: 700; letter-spacing: 0.05em;'>Tasa de Acierto Global</div>
-                <div style='font-size: 2.2rem; font-weight: 900; color: #10B981;'>{accuracy:.1f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-        st.markdown("---")
-        
-        # Obtener pendientes
-        pending_bets = []
-        for group_name, teams in pred.WC2026_GROUPS.items():
-            for i in range(len(teams)):
-                for j in range(i + 1, len(teams)):
-                    ta = pred.normalize_name(teams[i])
-                    tb = pred.normalize_name(teams[j])
-                    
-                    # Verificar si ya se jugó
-                    played = False
-                    for r in wc2026_results:
-                        r_home = pred.normalize_name(r['home'])
-                        r_away = pred.normalize_name(r['away'])
-                        if (r_home == ta and r_away == tb) or (r_home == tb and r_away == ta):
-                            played = True
-                            break
-                    
-                    if not played:
-                        # Obtener predicciones completas para goles y ganador
-                        probs, _ = get_match_prediction(ta, tb, selected_model_name)
-                        p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
-                        
-                        bet_type, prob, fav, und, is_a_fav = get_safest_bet(ta, tb, selected_model_name)
-                        
-                        # Obtener lambdas para goles
-                        lc = model_vars['lambda_cache'].get((ta, tb))
-                        lambda_total = 2.7
-                        lambda_a_val = 1.35
-                        lambda_b_val = 1.35
-                        if lc:
-                            lambda_a_val = lc['lambda_a']
-                            lambda_b_val = lc['lambda_b']
-                            lambda_total = lambda_a_val + lambda_b_val
-                            
-                        p_under_1_5 = math.exp(-lambda_total) * (1 + lambda_total)
-                        p_over_1_5 = 1 - p_under_1_5
-                        p_under_3_5 = math.exp(-lambda_total) * (1 + lambda_total + (lambda_total**2)/2 + (lambda_total**3)/6)
-                        p_both_score = (1 - math.exp(-lambda_a_val)) * (1 - math.exp(-lambda_b_val))
-                        p_both_score_no = 1 - p_both_score
-                        
-                        # Obtener cuotas reales o simuladas
-                        matchup_odds = live_odds.get((ta, tb))
-                        if not matchup_odds:
-                            matchup_odds = generate_stable_mock_odds(ta, tb, p_draw, p_win_a, p_win_b)
-                        
-                        # Elegir la cuota real/simulada para una casa de apuestas por defecto (Bet365)
-                        bm_odds = matchup_odds.get('Bet365', list(matchup_odds.values())[0] if matchup_odds else {'home': 1.8, 'draw': 3.2, 'away': 2.0})
-                        
-                        real_odd = get_market_odd(bet_type, is_a_fav, bm_odds, p_under_3_5, p_over_1_5, p_both_score_no)
-                        ia_fair_odd = round(1.0 / prob, 2) if prob > 0 else 99.0
-                        
-                        pending_bets.append({
-                            'group': group_name,
-                            'match': f"{ta} vs {tb}",
-                            'favorite': fav,
-                            'underdog': und,
-                            'bet_type': bet_type,
-                            'prob': prob,
-                            'fair_odd': ia_fair_odd,
-                            'real_odd': real_odd,
-                            'value': "🔥 VALOR (+EV)" if real_odd > ia_fair_odd else "Normal"
-                        })
-                        
-        pending_bets_sorted = sorted(pending_bets, key=lambda x: x['prob'], reverse=True)
-        
-        # --- NUEVA SECCIÓN: COMBINADAS RECOMENDADAS ---
-        if len(pending_bets_sorted) >= 3:
-            st.markdown("#### 🔗 Combinadas Recomendadas por la IA (Parlays)")
-            st.write("Combinamos múltiples pronósticos de alta probabilidad para maximizar la cuota manteniendo un perfil de riesgo controlado.")
-            
-            # 1. Combinada Segura
-            segura_items = pending_bets_sorted[:3]
-            prob_segura = 1.0
-            cuota_real_segura = 1.0
-            for b in segura_items:
-                prob_segura *= b['prob']
-                cuota_real_segura *= b['real_odd']
-            cuota_segura_justa = 1.0 / prob_segura if prob_segura > 0 else 1.0
-            ev_segura = ((cuota_real_segura / cuota_segura_justa) - 1.0) * 100.0
-            
-            # 2. Combinada Moderada
-            moderada_items = pending_bets_sorted[3:6] if len(pending_bets_sorted) >= 6 else pending_bets_sorted[-3:]
-            prob_moderada = 1.0
-            cuota_real_moderada = 1.0
-            for b in moderada_items:
-                prob_moderada *= b['prob']
-                cuota_real_moderada *= b['real_odd']
-            cuota_moderada_justa = 1.0 / prob_moderada if prob_moderada > 0 else 1.0
-            ev_moderada = ((cuota_real_moderada / cuota_moderada_justa) - 1.0) * 100.0
-            
-            col_parlay_1, col_parlay_2 = st.columns(2)
-            
-            with col_parlay_1:
-                st.markdown(f"""
-                <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border-left: 6px solid #10B981; margin-bottom: 20px; min-height: 280px; display: flex; flex-direction: column; justify-content: space-between;'>
-                    <div>
-                        <div style='display: flex; justify-content: space-between; align-items: center;'>
-                            <span style='background-color: #10B981; color: white; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>RIESGO BAJO</span>
-                            <span style='font-size: 0.9rem; color: #94A3B8;'>Prob: <b>{prob_segura*100:.1f}%</b></span>
-                        </div>
-                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟢 La Combinada Segura (Cuota @{cuota_real_segura:.2f})</h4>
-                        <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.6;'>
-                            • <b>{segura_items[0]['match']}</b>: {segura_items[0]['bet_type']} (@{segura_items[0]['real_odd']:.2f})<br>
-                            • <b>{segura_items[1]['match']}</b>: {segura_items[1]['bet_type']} (@{segura_items[1]['real_odd']:.2f})<br>
-                            • <b>{segura_items[2]['match']}</b>: {segura_items[2]['bet_type']} (@{segura_items[2]['real_odd']:.2f})<br>
-                            <span style='color: #94A3B8; font-size: 0.8rem;'>Cuota Justa IA: @{cuota_segura_justa:.2f} | Valor EV: <b style='color: #10B981;'>{ev_segura:+.1f}%</b></span>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            with col_parlay_2:
-                st.markdown(f"""
-                <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border-left: 6px solid #EAB308; margin-bottom: 20px; min-height: 280px; display: flex; flex-direction: column; justify-content: space-between;'>
-                    <div>
-                        <div style='display: flex; justify-content: space-between; align-items: center;'>
-                            <span style='background-color: #EAB308; color: #0F172A; font-weight: 800; font-size: 0.8rem; padding: 3px 10px; border-radius: 20px;'>RIESGO MEDIO</span>
-                            <span style='font-size: 0.9rem; color: #94A3B8;'>Prob: <b>{prob_moderada*100:.1f}%</b></span>
-                        </div>
-                        <h4 style='color: #F8FAFC; margin-top: 10px; margin-bottom: 10px;'>🟡 La Combinada de Valor (Cuota @{cuota_real_moderada:.2f})</h4>
-                        <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.6;'>
-                            • <b>{moderada_items[0]['match']}</b>: {moderada_items[0]['bet_type']} (@{moderada_items[0]['real_odd']:.2f})<br>
-                            • <b>{moderada_items[1]['match']}</b>: {moderada_items[1]['bet_type']} (@{moderada_items[1]['real_odd']:.2f})<br>
-                            • <b>{moderada_items[2]['match']}</b>: {moderada_items[2]['bet_type']} (@{moderada_items[2]['real_odd']:.2f})<br>
-                            <span style='color: #94A3B8; font-size: 0.8rem;'>Cuota Justa IA: @{cuota_moderada_justa:.2f} | Valor EV: <b style='color: #EAB308;'>{ev_moderada:+.1f}%</b></span>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            st.markdown("---")
-            
-        # Sub-pestañas para segmentar apuestas
-        sub_tab_pending, sub_tab_errors, sub_tab_history = st.tabs([
-            "🔮 Apuestas para Partidos Restantes",
-            "🚨 Errores de Cuota y Arbitraje",
-            "📜 Historial y Verificación de Resultados"
-        ])
-        
-        with sub_tab_pending:
-            st.markdown("#### 🔮 Pronósticos para los Próximos Partidos del Mundial 2026")
-            st.write("A continuación se listan las apuestas recomendadas (las de mayor probabilidad) para cada uno de los partidos restantes de la fase de grupos.")
-            
-            if len(pending_bets_sorted) > 0:
-                # Mostrar top 3 destacadas como tarjetas visuales
-                st.markdown("##### ⭐ Top 3 Apuestas más Seguras (Sólidas)")
-                col_top_1, col_top_2, col_top_3 = st.columns(3)
-                top_cols = [col_top_1, col_top_2, col_top_3]
-                
-                for idx, bet in enumerate(pending_bets_sorted[:3]):
-                    with top_cols[idx]:
-                        st.markdown(f"""
-                        <div style='background-color: #1E293B; border-radius: 12px; padding: 15px; border-top: 5px solid #38BDF8; margin-bottom: 15px;'>
-                            <div style='font-size: 0.75rem; color: #94A3B8; text-transform: uppercase; font-weight: 700;'>Grupo {bet['group']}</div>
-                            <div style='font-size: 1rem; font-weight: 700; color: #F8FAFC; margin: 5px 0;'>{bet['match']}</div>
-                            <div style='font-size: 0.85rem; color: #38BDF8;'>👉 <b>{bet['bet_type']}</b></div>
-                            <div style='font-size: 1.4rem; font-weight: 900; color: #10B981; margin-top: 5px;'>{bet['prob']*100:.1f}%</div>
-                            <div style='font-size: 0.75rem; color: #94A3B8;'>Cuota Real: <b>@{bet['real_odd']:.2f}</b> ({bet['value']})</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                
-                # Mostrar lista completa en tabla interactiva
-                st.markdown("##### 📋 Listado Completo de Partidos Restantes")
-                df_pending = pd.DataFrame([
-                    {
-                        'Grupo': f"Grupo {b['group']}",
-                        'Partido': b['match'],
-                        'Apuesta Recomendada': b['bet_type'],
-                        'Confianza de la IA': f"{b['prob']*100:.1f}%",
-                        'Cuota Justa': f"@{b['fair_odd']:.2f}",
-                        'Cuota Real (Bet365)': f"@{b['real_odd']:.2f}",
-                        'Valoración': b['value'],
-                        'Evaluación': b['value'],
-                        'Tipo': "🆕 NEW (Predicción Pura)"
-                    } for b in pending_bets_sorted
-                ])
-                st.dataframe(df_pending, use_container_width=True, hide_index=True)
-            else:
-                st.info("🎉 ¡Fase de grupos completada! Todos los partidos ya han sido jugados.")
-                
-        with sub_tab_errors:
-            st.markdown("#### 🚨 Detección de Errores de Cuotas y Arbitraje Deportivo")
-            st.write("Esta sección identifica anomalías matemáticas y discrepancias críticas en el mercado:")
-            st.markdown("""
-            1. **Surebets (Arbitraje Deportivo):** Oportunidades donde la diferencia de cuotas entre distintas casas de apuestas permite apostar a todas las posibilidades y asegurar un beneficio matemático neto (sin riesgo de pérdida).
-            2. **Desajustes de Cuota (+EV Crítico):** Situaciones donde alguna casa de apuestas ofrece una cuota que supera por más de un **12%** a la cuota justa calculada por nuestro modelo predictivo.
-            """)
-            
-            # Listas para guardar las oportunidades encontradas
-            surebets = []
-            extreme_values = []
-            
-            for b in pending_bets_sorted:
-                ta, tb = b['match'].split(" vs ")
-                
-                # Obtener predicciones completas
-                probs, _ = get_match_prediction(ta, tb, selected_model_name)
+                # Check outcome hit
+                probs, _ = get_match_prediction(home_norm, away_norm, selected_model_name)
                 p_draw, p_win_a, p_win_b = probs[0], probs[1], probs[2]
                 
-                # Obtener cuotas de todas las casas de apuestas (reales o simuladas)
-                matchup_odds = live_odds.get((ta, tb))
-                if not matchup_odds:
-                    matchup_odds = generate_stable_mock_odds(ta, tb, p_draw, p_win_a, p_win_b)
+                # Calculate real vs predicted outcome
+                if real_h_score > real_a_score:
+                    real_out = 1
+                elif real_h_score == real_a_score:
+                    real_out = 0
+                else:
+                    real_out = 2
+                    
+                if p_win_a > p_win_b and p_win_a > p_draw:
+                    pred_out = 1
+                elif p_win_b > p_win_a and p_win_b > p_draw:
+                    pred_out = 2
+                else:
+                    pred_out = 0
+                    
+                if real_h_score == exp_h_score and real_a_score == exp_a_score:
+                    status_text += "  ⭐ ¡MARCADOR EXACTO!"
+                elif real_out == pred_out:
+                    status_text += "  🎯 ¡ACERTADO (1X2)!"
+                else:
+                    status_text += "  ❌ NO ACERTADO"
+            else:
+                status_text = f"⏳ IA Esperado: {exp_h_score} - {exp_a_score}"
                 
-                if matchup_odds:
-                    # Encontrar el bookmaker con la mejor cuota para cada opción de 1X2
-                    best_home_odd = 0.0
-                    best_home_bm = ""
-                    best_draw_odd = 0.0
-                    best_draw_bm = ""
-                    best_away_odd = 0.0
-                    best_away_bm = ""
-                    
-                    for bm_name, odds in matchup_odds.items():
-                        if odds['home'] > best_home_odd:
-                            best_home_odd = odds['home']
-                            best_home_bm = bm_name
-                        if odds['draw'] > best_draw_odd:
-                            best_draw_odd = odds['draw']
-                            best_draw_bm = bm_name
-                        if odds['away'] > best_away_odd:
-                            best_away_odd = odds['away']
-                            best_away_bm = bm_name
-                            
-                    # Verificar si existe Surebet (suma de inversas < 1.0)
-                    inv_home = 1.0 / best_home_odd if best_home_odd > 0 else 0
-                    inv_draw = 1.0 / best_draw_odd if best_draw_odd > 0 else 0
-                    inv_away = 1.0 / best_away_odd if best_away_odd > 0 else 0
-                    sure_sum = inv_home + inv_draw + inv_away
-                    
-                    if sure_sum < 1.0 and sure_sum > 0:
-                        profit = (1.0 / sure_sum - 1.0) * 100.0
-                        surebets.append({
-                            'match': b['match'],
-                            'home': f"{best_home_bm} (@{best_home_odd:.2f})",
-                            'draw': f"{best_draw_bm} (@{best_draw_odd:.2f})",
-                            'away': f"{best_away_bm} (@{best_away_odd:.2f})",
-                            'profit': profit,
-                            'sure_sum': sure_sum,
-                            'best_home_odd': best_home_odd,
-                            'best_draw_odd': best_draw_odd,
-                            'best_away_odd': best_away_odd
-                        })
-                        
-                    # Verificar Value Bets extremas en 1X2 (>12% de EV)
-                    ia_odd_home = 1.0 / p_win_a if p_win_a > 0 else 99.0
-                    ia_odd_draw = 1.0 / p_draw if p_draw > 0 else 99.0
-                    ia_odd_away = 1.0 / p_win_b if p_win_b > 0 else 99.0
-                    
-                    for bm_name, odds in matchup_odds.items():
-                        ev_home = ((odds['home'] / ia_odd_home) - 1.0) * 100.0
-                        ev_draw = ((odds['draw'] / ia_odd_draw) - 1.0) * 100.0
-                        ev_away = ((odds['away'] / ia_odd_away) - 1.0) * 100.0
-                        
-                        if ev_home > 12.0:
-                            extreme_values.append({
-                                'Partido': b['match'],
-                                'Casa de Apuestas': bm_name,
-                                'Selección': f"Gana {ta}",
-                                'Cuota Real': f"@{odds['home']:.2f}",
-                                'Cuota IA': f"@{ia_odd_home:.2f}",
-                                'Valor (+EV)': f"{ev_home:+.1f}%"
-                            })
-                        if ev_draw > 12.0:
-                            extreme_values.append({
-                                'Partido': b['match'],
-                                'Casa de Apuestas': bm_name,
-                                'Selección': "Empate",
-                                'Cuota Real': f"@{odds['draw']:.2f}",
-                                'Cuota IA': f"@{ia_odd_draw:.2f}",
-                                'Valor (+EV)': f"{ev_draw:+.1f}%"
-                            })
-                        if ev_away > 12.0:
-                            extreme_values.append({
-                                'Partido': b['match'],
-                                'Casa de Apuestas': bm_name,
-                                'Selección': f"Gana {tb}",
-                                'Cuota Real': f"@{odds['away']:.2f}",
-                                'Cuota IA': f"@{ia_odd_away:.2f}",
-                                'Valor (+EV)': f"{ev_away:+.1f}%"
-                            })
+            header_title = f"{date_es} {m['time']} ({m['group']})  |  {home_flag} {home_norm} vs {away_norm} {away_flag}  |  {status_text}"
             
-            # --- Renderizar Surebets ---
-            st.markdown("##### 💸 Oportunidades de Arbitraje Encontradas (Surebets)")
-            if len(surebets) > 0:
-                surebets_sorted = sorted(surebets, key=lambda x: x['profit'], reverse=True)
-                for sb in surebets_sorted:
-                    # Distribuir stake para inversión total de 100 €
-                    stake_h = 100.0 * (1.0 / sb['best_home_odd']) / sb['sure_sum']
-                    stake_d = 100.0 * (1.0 / sb['best_draw_odd']) / sb['sure_sum']
-                    stake_a = 100.0 * (1.0 / sb['best_away_odd']) / sb['sure_sum']
-                    ganancia_segura = (100.0 / sb['sure_sum']) - 100.0
-                    
-                    st.markdown(f"""
-                    <div style='background-color: #1E293B; border-radius: 12px; padding: 20px; border-left: 6px solid #10B981; margin-bottom: 15px;'>
-                        <div style='display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap;'>
-                            <h5 style='color: #F8FAFC; margin: 0; font-weight: 800;'>🔥 {sb['match']}</h5>
-                            <span style='background-color: #10B981; color: white; font-weight: 800; font-size: 0.85rem; padding: 4px 12px; border-radius: 20px;'>
-                                Retorno Seguro: +{sb['profit']:.2f}%
-                            </span>
-                        </div>
-                        <div style='font-size: 0.85rem; color: #E2E8F0; line-height: 1.8;'>
-                            • <b>Local (1):</b> {sb['home']} ➔ Apostar <b>{stake_h:.2f} €</b> (Retorno: {(stake_h * sb['best_home_odd']):.2f} €)<br>
-                            • <b>Empate (X):</b> {sb['draw']} ➔ Apostar <b>{stake_d:.2f} €</b> (Retorno: {(stake_d * sb['best_draw_odd']):.2f} €)<br>
-                            • <b>Visitante (2):</b> {sb['away']} ➔ Apostar <b>{stake_a:.2f} €</b> (Retorno: {(stake_a * sb['best_away_odd']):.2f} €)<br>
-                            <span style='color: #38BDF8; font-weight: 700; font-size: 0.85rem;'>
-                                Inversión: 100.00 € | Ganancia neta garantizada: {ganancia_segura:.2f} € sin importar el resultado.
-                            </span>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("ℹ️ No se detectan oportunidades de arbitraje (surebets) con las cuotas actuales de las casas de apuestas.")
+            with st.expander(header_title):
+                display_match_details(home_norm, away_norm, real_h_score, real_a_score)
                 
-            # --- Renderizar Value Bets Extremas ---
-            st.markdown("##### 🎯 Desajustes Críticos de Cuota de las Casas de Apuestas")
-            if len(extreme_values) > 0:
-                df_extreme = pd.DataFrame(extreme_values)
-                # Ordenar por EV
-                df_extreme['ev_num'] = df_extreme['Valor (+EV)'].str.replace('%', '').str.replace('+', '').astype(float)
-                df_extreme = df_extreme.sort_values(by='ev_num', ascending=False).drop(columns=['ev_num'])
-                
-                st.dataframe(df_extreme, use_container_width=True, hide_index=True)
-                st.warning("⚠️ **Atención:** Las cuotas descompensadas con EV muy alto pueden responder a noticias de última hora no reflejadas en los modelos (lesiones críticas, ausencias, alineaciones alternativas). Evalúalas con criterio futbolístico antes de apostar.")
-            else:
-                st.info("ℹ️ No se detectan desajustes críticos de cuota (>12% EV) en los partidos restantes del Mundial.")
-
-                
-        with sub_tab_history:
-            st.markdown("#### 📜 Historial de Apuestas y Resultados Obtenidos")
-            st.write("Verificación detallada de los pronósticos realizados en los partidos ya completados.")
+            matches_rendered += 1
             
-            if len(played_bets_data) > 0:
-                df_played = pd.DataFrame(played_bets_data)
-                st.dataframe(df_played, use_container_width=True, hide_index=True)
-            else:
-                st.info("⏳ Aún no se han registrado partidos jugados en la Copa del Mundo 2026.")
-                
+        if matches_rendered == 0:
+            st.info("No se encontraron partidos para los filtros aplicados.")
+            
+    else:
+        # Enfrentamiento Fantasía (Personalizado)
+        st.markdown("### ⚔️ Enfrentamiento Personalizado (Fantasía)")
+        st.write("Configura un partido amistoso personalizado entre cualquier selección mundialista para ver la predicción de la IA.")
+        
+        all_teams = sorted(pred.ALL_WC_TEAMS)
+        col_sel_a, col_sel_b = st.columns(2)
+        with col_sel_a:
+            team_a = st.selectbox("Selecciona Equipo Local (A):", all_teams, index=0)
+        with col_sel_b:
+            remaining_teams = [t for t in all_teams if t != team_a]
+            team_b = st.selectbox("Selecciona Equipo Visitante (B):", remaining_teams, index=0)
+            
+        st.markdown("---")
+        
+        # Display team metrics summary
+        color_a = get_team_color(team_a, "#2563EB")
+        color_b = get_team_color(team_b, "#DC2626")
+        elo_a = model_vars['elo'].get_rating(team_a)
+        elo_b = model_vars['elo'].get_rating(team_b)
+        sv_a = pred.get_squad_value(team_a)
+        sv_b = pred.get_squad_value(team_b)
+        conf_a = pred.get_confederation(team_a)
+        conf_b = pred.get_confederation(team_b)
+        
+        col_card_a, col_card_vs, col_card_b = st.columns([4, 2, 4])
+        with col_card_a:
+            st.markdown(f"""
+            <div class='card' style='border-top: 6px solid {color_a}; text-align: center;'>
+                <div style='font-size: 3rem;'>{get_flag(team_a)}</div>
+                <div style='font-size: 1.8rem; font-weight: 800;'>{team_a}</div>
+                <div style='margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;'>
+                    <div><div class='metric-label'>Ranking FIFA</div><div class='metric-value'>#{pred.FIFA_RANKINGS.get(team_a, {}).get('rank', 'N/A')}</div></div>
+                    <div><div class='metric-label'>Rating ELO</div><div class='metric-value'>{elo_a:.0f}</div></div>
+                    <div><div class='metric-label'>Plantilla</div><div class='metric-value'>{sv_a:.1f}M€</div></div>
+                    <div><div class='metric-label'>Confed.</div><div class='metric-value'>{conf_a}</div></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_card_vs:
+            st.markdown("<div style='height: 40px;'></div>", unsafe_allow_html=True)
+            st.markdown("<div class='vs-badge'>VS</div>", unsafe_allow_html=True)
+        with col_card_b:
+            st.markdown(f"""
+            <div class='card' style='border-top: 6px solid {color_b}; text-align: center;'>
+                <div style='font-size: 3rem;'>{get_flag(team_b)}</div>
+                <div style='font-size: 1.8rem; font-weight: 800;'>{team_b}</div>
+                <div style='margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;'>
+                    <div><div class='metric-label'>Ranking FIFA</div><div class='metric-value'>#{pred.FIFA_RANKINGS.get(team_b, {}).get('rank', 'N/A')}</div></div>
+                    <div><div class='metric-label'>Rating ELO</div><div class='metric-value'>{elo_b:.0f}</div></div>
+                    <div><div class='metric-label'>Plantilla</div><div class='metric-value'>{sv_b:.1f}M€</div></div>
+                    <div><div class='metric-label'>Confed.</div><div class='metric-value'>{conf_b}</div></div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        display_match_details(team_a, team_b)
+        
 else:
     st.warning("⚠️ El modelo de Machine Learning no ha terminado de entrenarse o no está disponible. Inicializa el script primero.")
